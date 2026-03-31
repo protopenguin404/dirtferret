@@ -19,7 +19,6 @@
           cmake
           ninja
           pkg-config
-          rsync
           libx11
           libxcomposite
           libxdamage
@@ -48,65 +47,59 @@
         CEF_STORE = "${cef}";
 
         shellHook = ''
-          set -euo pipefail
           PROJ="$PWD"
           WS="$PROJ/workspace"
           CEF_STORE="${cef}"
 
-          # Assemble workspace from immutable nix store CEF + mutable project sources.
           _assemble_workspace() {
-            echo "[workspace] Assembling from $CEF_STORE ..."
-
-            # Stage in a tmpdir to make the swap atomic-ish.
-            TMPWS=$(mktemp -d /tmp/.cef-ws-XXXXXX)
-            trap 'rm -rf "$TMPWS"' ERR
-
-            # 1. Copy CEF distribution (immutable base) — writable copies.
-            rsync -a "$CEF_STORE/" "$TMPWS/"
-            chmod -R u+w "$TMPWS"
-
-            # 2. Overlay our source tree.
-            rsync -a "$PROJ/src/" "$TMPWS/src/"
-
-            # 3. Overlay our top-level CMakeLists.txt (has our app wired in).
-            cp "$PROJ/CMakeLists.txt" "$TMPWS/CMakeLists.txt"
-
-            # 4. Preserve build cache if it exists.
-            if [ -d "$WS/build" ]; then
-              rsync -a "$WS/build/" "$TMPWS/build/"
-            fi
-
-            # 5. Swap into place.
+            # Remove stale workspace if present (from a crashed session, etc.)
             rm -rf "$WS"
-            mv "$TMPWS" "$WS"
+            mkdir -p "$WS"
 
-            echo "[workspace] Ready at $WS"
+            # Ensure persistent build dir exists at repo root.
+            mkdir -p "$PROJ/build"
+
+            # FIRST: inject our source, build config, and build cache (real project files).
+            ln -s "$PROJ/src" "$WS/src"
+            ln -s "$PROJ/CMakeLists.txt" "$WS/CMakeLists.txt"
+            ln -s "$PROJ/build" "$WS/build"
+
+            # SECOND: overlay CEF library dirs from the nix store (read-only symlinks).
+            for item in include libcef_dll cmake Release Resources; do
+              ln -s "$CEF_STORE/$item" "$WS/$item"
+            done
+
+            echo "[workspace] Ready at $WS (symlinked)"
+          }
+
+          _cleanup_workspace() {
+            if [ -d "$WS" ]; then
+              rm -rf "$WS"
+              echo "[workspace] Cleaned up."
+            fi
           }
 
           _assemble_workspace
+          trap _cleanup_workspace EXIT
 
-          # Convenience: cd into workspace on shell open.
-          echo "[workspace] To build:"
-          echo "  cd workspace/build && cmake -G Ninja -DCMAKE_BUILD_TYPE=Release .. && ninja cef-terminal"
-          echo ""
-          echo "  Or just run: build-cef"
-
-          # Helper function to configure + build in one shot.
+          # Build helper: configure + compile in one shot.
           build-cef() {
-            mkdir -p "$WS/build"
-            cd "$WS/build"
-            cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release ..
-            ninja cef-terminal
+            (
+              cd "$WS/build"
+              cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release ..
+              ninja cef-terminal
+            )
             echo "[build] Binary at: $WS/build/src/Release/cef-terminal"
           }
 
-          # Helper to sync source changes into the workspace without full rebuild.
-          sync-src() {
-            rsync -a "$PROJ/src/" "$WS/src/"
-            echo "[sync] Source synced to workspace."
-          }
+          export -f build-cef
 
-          export -f build-cef sync-src
+          echo ""
+          echo "  build:  build-cef"
+          echo "  run:    cd workspace/build/src/Release && ./cef-terminal --no-sandbox"
+          echo ""
+          echo "  Source edits in src/ are live (symlinked). No sync needed."
+          echo ""
         '';
       };
   };
