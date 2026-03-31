@@ -1,0 +1,25 @@
+# Build output
+build/
+
+# CEF binary distribution files (come from nix store)
+Release/
+Resources/
+include/
+libcef_dll/
+cmake/
+bazel/
+BUILD.bazel
+MODULE.bazel
+WORKSPACE
+CREDITS.html
+LICENSE.txt
+README.txt
+.bazelrc
+.bazelversion
+
+# Assembled workspace (immutable CEF + mutable sources)
+workspace/
+
+# Nix result symlinks
+result
+result-*
