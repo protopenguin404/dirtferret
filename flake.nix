@@ -86,20 +86,19 @@
           build-cef() {
             (
               cd "$WS/build"
-              cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release ..
+              cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=1 ..
               ninja cef-terminal
             )
             echo "[build] Binary at: $WS/build/src/Release/cef-terminal"
           }
 
-          export -f build-cef
+          run() {
+            cd $PROJ/workspace/build/src/Release && ./cef-terminal --no-sandbox
+          }
 
-          echo ""
-          echo "  build:  build-cef"
-          echo "  run:    cd workspace/build/src/Release && ./cef-terminal --no-sandbox"
-          echo ""
-          echo "  Source edits in src/ are live (symlinked). No sync needed."
-          echo ""
+          export -f build-cef
+          export -f run
+
         '';
       };
   };
