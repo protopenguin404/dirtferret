@@ -5,6 +5,6 @@ WS="$PROJ/workspace"
 (
   cd "$WS/build"
   cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=1 ..
-  ninja cef-terminal
+  ninja cef-backend cef-frontend
 )
-echo "[build] Binary at: $WS/build/src/Release/cef-terminal"
+echo "[build] Binaries at: $WS/build/src/Release/{cef-backend,cef-frontend}"

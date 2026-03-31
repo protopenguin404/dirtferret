@@ -39,6 +39,7 @@
           cairo
           pango
           alsa-lib
+          lua5_4
           claude-code
           claude-mergetool
           claude-code-router
