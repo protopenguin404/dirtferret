@@ -18,8 +18,15 @@ set(BACKEND_SRCS
   backend_main.cc
   ${API_SRCS}
   plugin/lua_host.cc
-  # backend/engine.cc     — TODO: CEF engine implementation
-  # ipc/...               — TODO: IPC server implementation
+  backend/app.cc
+  backend/app.h
+  backend/client.cc
+  backend/client.h
+  backend/engine.cc
+  backend/engine.h
+  backend/minimal_renderer.cc
+  backend/minimal_renderer.h
+  # ipc/...            
   )
 
 add_executable(cef-backend ${BACKEND_SRCS})
@@ -59,7 +66,7 @@ COPY_FILES("cef-backend" "${CEF_RESOURCE_FILES}" "${CEF_RESOURCE_DIR}" "${CEF_TA
 # --- Frontend (terminal client — NO CEF dependency) ---
 set(FRONTEND_SRCS
   frontend_main.cc
-  frontend/kitty_renderer.cc
+  # frontend/kitty_renderer.cc— TODO: kitty stuff
   # frontend/input.cc     — TODO: terminal input implementation
   # ipc/...               — TODO: IPC client implementation
   )

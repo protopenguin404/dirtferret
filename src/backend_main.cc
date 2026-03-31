@@ -1,39 +1,39 @@
 #include "api/dispatcher.h"
+#include "backend/engine.h"
 
 #include <iostream>
 
-// Backend entry point.
-// This will become the daemon/server process that runs CEF,
-// hosts the API dispatcher and plugin runtime, and serves
-// connected frontends via IPC.
-//
-// For now it just proves the layers wire together.
-
 int main(int argc, char* argv[]) {
+    // --- CEF engine ---
+    cef_terminal::Engine engine;
+
+    if (!engine.initialize(argc, argv)) {
+        // Either we're a CEF child process (normal), or init failed.
+        int code = engine.child_exit_code();
+        if (code >= 0) {
+            return code;  // clean child process exit
+        }
+        std::cerr << "[backend] Engine init failed." << std::endl;
+        return 1;
+    }
+
     std::cerr << "[backend] Starting cef-backend..." << std::endl;
 
-    // --- Layer setup (order matters) ---
-
-    // 1. API layer — the central hub, created first so layers can register with it.
+    // --- API layer ---
     cef_terminal::Dispatcher dispatcher;
-
-    // 2. CEF engine — will be initialized here, registers its handlers.
-    // TODO: Engine engine; engine.initialize(argc, argv);
-    //       engine.register_handlers(dispatcher);
-
-    // 3. Plugin runtime — loads plugins, registers their handlers.
-    // TODO: PluginHost plugins; plugins.initialize();
-    //       plugins.register_handlers(dispatcher);
-
-    // 4. IPC server — listens for frontend connections.
-    // TODO: transport.listen(endpoint, on_client);
-
-    std::cerr << "[backend] All layers initialized (stubs)." << std::endl;
+    engine.register_handlers(dispatcher);
 
     // --- Main loop ---
-    // Will be: CEF tick + IPC poll + dispatch, in a loop.
-    // For now, just exit.
+    // For now, just tick CEF. Later: IPC poll + dispatch.
+    std::cerr << "[backend] Entering main loop..." << std::endl;
+    bool running = true;
+    while (running) {
+        engine.tick();
+        // TODO: poll IPC, dispatch commands
+        // TODO: exit condition (for now, CEF message loop will just run)
+    }
 
-    std::cerr << "[backend] Shutting down." << std::endl;
+    engine.shutdown();
+    std::cerr << "[backend] Shutdown." << std::endl;
     return 0;
 }

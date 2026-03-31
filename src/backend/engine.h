@@ -1,43 +1,50 @@
 #pragma once
 
+#include "include/cef_app.h"
+
 #include <cstdint>
 #include <functional>
-#include <string>
-#include <vector>
 
 namespace cef_terminal {
 
 class Dispatcher;
 
-// Callback for when a buffer produces a new frame.
-// Receives: buffer_id, pixel data (BGRA), width, height.
 using FrameCallback = std::function<void(int32_t, const void*, int, int)>;
 
 // The Engine is the backend's interface to CEF.
 // It manages buffer (browser) lifecycles and captures rendered frames.
 // Only this layer touches CEF headers — everything else goes through
 // the Dispatcher via commands and queries.
+//
+// This is NOT a CefBase-derived class — it's our own class that *owns*
+// CefRefPtr'd objects. No IMPLEMENT_REFCOUNTING needed.
 class Engine {
  public:
-    virtual ~Engine() = default;
+    Engine();
+    ~Engine();
 
-    // Initialize CEF and start the engine.
-    virtual bool initialize(int argc, char* argv[]) = 0;
+    // Initialize CEF. Returns false if this is a CEF child process
+    // (caller should exit with child_exit_code()) or if init fails.
+    bool initialize(int argc, char* argv[]);
+
+    // If initialize() returned false, this is the child process exit code.
+    // -1 means it wasn't a child process (init failed for another reason).
+    int child_exit_code() const { return child_exit_code_; }
 
     // Run one iteration of CEF's message loop.
-    // Call this from the backend's main loop instead of CefRunMessageLoop().
-    virtual void tick() = 0;
+    void tick();
 
     // Shut down CEF cleanly.
-    virtual void shutdown() = 0;
+    void shutdown();
 
-    // Register command/query handlers with the dispatcher.
-    // Called once during setup to wire the engine into the API layer.
-    virtual void register_handlers(Dispatcher& dispatcher) = 0;
+    // TODO: wire these up
+    void register_handlers(Dispatcher& dispatcher) {}
+    void set_frame_callback(FrameCallback cb) {}
 
-    // Set the callback for new frames. The engine calls this whenever
-    // a buffer's OnPaint fires with new pixel data.
-    virtual void set_frame_callback(FrameCallback cb) = 0;
+ private:
+    CefRefPtr<CefApp> app_;
+    bool initialized_ = false;
+    int child_exit_code_ = -1;
 };
 
-}  // namespace cef_terminal
+} // namespace cef_terminal
