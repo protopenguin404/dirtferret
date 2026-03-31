@@ -89,12 +89,6 @@
 
             function build-cef; $PROJ/scripts/build-cef.sh; end
             function run; $PROJ/scripts/run.sh; end
-
-            echo ''
-            echo '  build:  build-cef'
-            echo '  run:    run'
-            echo '  Source edits in src/ are live (symlinked). No sync needed.'
-            echo ''
           "
 
           # Fish exited — clean up workspace and exit bash too.
