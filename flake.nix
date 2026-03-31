@@ -80,25 +80,26 @@
           }
 
           _assemble_workspace
-          trap _cleanup_workspace EXIT
 
-          # Build helper: configure + compile in one shot.
-          build-cef() {
-            (
-              cd "$WS/build"
-              cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=1 ..
-              ninja cef-terminal
-            )
-            echo "[build] Binary at: $WS/build/src/Release/cef-terminal"
-          }
+          # Hand off to fish. Cleanup runs after fish exits (bash resumes here).
+          fish -C "
+            set -gx PROJ $PROJ
+            set -gx WS $WS
+            set -gx CEF_STORE $CEF_STORE
 
-          run() {
-            cd $PROJ/workspace/build/src/Release && ./cef-terminal --no-sandbox
-          }
+            function build-cef; $PROJ/scripts/build-cef.sh; end
+            function run; $PROJ/scripts/run.sh; end
 
-          export -f build-cef
-          export -f run
+            echo ''
+            echo '  build:  build-cef'
+            echo '  run:    run'
+            echo '  Source edits in src/ are live (symlinked). No sync needed.'
+            echo ''
+          "
 
+          # Fish exited — clean up workspace and exit bash too.
+          _cleanup_workspace
+          exit
         '';
       };
   };
