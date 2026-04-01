@@ -16,7 +16,9 @@ void MinimalApp::OnContextInitialized() {
   CefWindowInfo window_info;
   window_info.SetAsWindowless(0);
 
-  CefBrowserHost::CreateBrowser(window_info, new MinimalClient(),
+  client_ = new MinimalClient();
+
+  CefBrowserHost::CreateBrowser(window_info, client_,
                                 "https://example.com", browser_settings,
                                 nullptr, nullptr);
 }

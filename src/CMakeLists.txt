@@ -3,9 +3,11 @@
 # Determine the target output directory.
 SET_CEF_TARGET_OUT_DIR()
 
-# --- Shared sources (API layer, used by both targets) ---
-set(API_SRCS
+# --- Shared sources (API layer + IPC, used by both targets) ---
+set(SHARED_SRCS
   api/dispatcher.cc
+  ipc/serialization.cc
+  ipc/unix_socket_transport.cc
   )
 
 # --- Backend (CEF daemon + API + plugins) ---
@@ -16,7 +18,7 @@ pkg_check_modules(LUA REQUIRED lua)
 
 set(BACKEND_SRCS
   backend_main.cc
-  ${API_SRCS}
+  ${SHARED_SRCS}
   plugin/lua_host.cc
   backend/app.cc
   backend/app.h
@@ -26,7 +28,6 @@ set(BACKEND_SRCS
   backend/engine.h
   backend/minimal_renderer.cc
   backend/minimal_renderer.h
-  # ipc/...            
   )
 
 add_executable(cef-backend ${BACKEND_SRCS})
@@ -66,9 +67,9 @@ COPY_FILES("cef-backend" "${CEF_RESOURCE_FILES}" "${CEF_RESOURCE_DIR}" "${CEF_TA
 # --- Frontend (terminal client — NO CEF dependency) ---
 set(FRONTEND_SRCS
   frontend_main.cc
-  # frontend/kitty_renderer.cc— TODO: kitty stuff
-  # frontend/input.cc     — TODO: terminal input implementation
-  # ipc/...               — TODO: IPC client implementation
+  ${SHARED_SRCS}
+  # frontend/kitty_renderer.cc — TODO: kitty stuff
+  # frontend/input.cc          — TODO: terminal input implementation
   )
 
 add_executable(cef-frontend ${FRONTEND_SRCS})

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "backend/app.h"
 #include "include/cef_app.h"
 
 #include <cstdint>
@@ -37,12 +38,14 @@ class Engine {
     // Shut down CEF cleanly.
     void shutdown();
 
-    // TODO: wire these up
-    void register_handlers(Dispatcher& dispatcher) {}
+    // Register buffer.* commands and queries with the dispatcher.
+    void register_handlers(Dispatcher& dispatcher);
+
+    // TODO: wire up frame delivery
     void set_frame_callback(FrameCallback cb) {}
 
  private:
-    CefRefPtr<CefApp> app_;
+    CefRefPtr<MinimalApp> app_;
     bool initialized_ = false;
     int child_exit_code_ = -1;
 };

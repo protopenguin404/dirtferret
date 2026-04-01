@@ -86,7 +86,7 @@
           fish -C "
             set -gx PROJ $PROJ
             set -gx WS $WS
-            set -gx CEF_STORE $CEF_STORE
+            set -gx CEF_DIR $CEF_STORE
 
             function build-cef; $PROJ/scripts/build-cef.sh; end
             function run; $PROJ/scripts/run.sh; end
