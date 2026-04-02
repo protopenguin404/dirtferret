@@ -50,7 +50,7 @@
         shellHook = ''
           PROJ="$PWD"
           WS="$PROJ/workspace"
-          CEF_STORE="${cef}"
+          CEF_ROOT="${cef}"
 
           _assemble_workspace() {
             # Remove stale workspace if present (from a crashed session, etc.)
@@ -67,7 +67,7 @@
 
             # SECOND: overlay CEF library dirs from the nix store (read-only symlinks).
             for item in include libcef_dll cmake Release Resources; do
-              ln -s "$CEF_STORE/$item" "$WS/$item"
+              ln -s "$CEF_ROOT/$item" "$WS/$item"
             done
 
             echo "[workspace] Ready at $WS (symlinked)"
@@ -86,7 +86,7 @@
           fish -C "
             set -gx PROJ $PROJ
             set -gx WS $WS
-            set -gx CEF_DIR $CEF_STORE
+            set -gx CEF_ROOT $CEF_ROOT
 
             function build-cef; $PROJ/scripts/build-cef.sh; end
             function run; $PROJ/scripts/run.sh; end
