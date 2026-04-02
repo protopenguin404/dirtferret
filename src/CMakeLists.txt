@@ -79,3 +79,39 @@ target_include_directories(cef-frontend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Frontend does NOT link against CEF. This is intentional —
 # it enforces the process boundary at the build level.
+
+# --- Tests (Google Test) ---
+find_package(GTest REQUIRED)
+enable_testing()
+
+# Test target: IPC serialization (existing code — should pass now).
+add_executable(test-serialization
+  tests/test_serialization.cc
+  ${SHARED_SRCS}
+  )
+target_include_directories(test-serialization PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test-serialization GTest::gtest GTest::gtest_main)
+add_test(NAME serialization COMMAND test-serialization)
+
+# Test target: FRAME wire format (needs transport extension).
+# Won't pass until you extend send()/try_parse_message() for FRAME metadata.
+add_executable(test-frame-wire
+  tests/test_frame_wire.cc
+  ${SHARED_SRCS}
+  )
+target_include_directories(test-frame-wire PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test-frame-wire GTest::gtest GTest::gtest_main)
+add_test(NAME frame-wire COMMAND test-frame-wire)
+
+# Test target: frontend (Terminal + KittyRenderer).
+# Won't compile until you implement both classes.
+add_executable(test-frontend
+  tests/test_terminal.cc
+  tests/test_kitty_renderer.cc
+  frontend/terminal.cc
+  frontend/kitty_renderer.cc
+  ${SHARED_SRCS}
+  )
+target_include_directories(test-frontend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test-frontend GTest::gtest GTest::gtest_main)
+add_test(NAME frontend COMMAND test-frontend)

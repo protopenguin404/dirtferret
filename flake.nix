@@ -40,6 +40,7 @@
           pango
           alsa-lib
           lua5_4
+          gtest
           claude-code
           claude-mergetool
           claude-code-router
