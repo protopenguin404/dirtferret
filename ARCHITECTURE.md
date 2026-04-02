@@ -1,86 +1,159 @@
-# ARCHITECTURE Overview
+# Architecture
 
-** General Layout **
-This Program will borrow heavily from the nvim architecture. namely, that is to say that each 'browser'
-(tab) is equivalent to one 'buffer.' To accomplish this, we are conceptually going to separate each 
-layer of responsibility. There are four, as of my current mental model:
+This document describes the design of cef-terminal: the process model, layer responsibilities, communication patterns, and key terminology. It is the founding vision document. Implementation details change; the principles here should not (or at least, not without good reason).
 
-1. ** CEF Backend **
-    This will be, primarily, just a dumb api, as much as we can reasonably relegate it as such. we 
-    effectively just want to expose its own API in such a way that it can be called into. There is an
-    important clarification to be made in section 4. this will ideally run as a daemon
-    addendum: we will probably implement all of the lifecycle, buffer management, history and so forth
-    here too; though that could optionally be an additional layer or folded into sect 4
+## Design principles
 
-2. ** Kitty Based Frontend **
-    This, similar to the backend, is a dumb pixel renderer and input capturing layer. This will be the 
-    bit where we can define any keyboard/layout stuff, exposed so that plugins do the control. 
+- **Separation of concerns with an iron fist.** Each layer has one job. Cross-layer communication goes through the API dispatcher, never through direct calls.
+- **Composition over inheritance.** Except where CEF requires subclassing, prefer composable interfaces and dependency injection.
+- **Declarative and explicit.** Borrowing philosophically from Nix: reproducible, declarative configuration. No magic globals, no implicit state.
+- **Policy vs. mechanics.** If the user might want to configure it, it's policy and lives in the plugin layer. If it's internal coordination, it's mechanical and lives in the API layer.
 
-3. ** Plugin/Lua runtime **
-    This one of two of the most important bits, and where we diverge from nvim some. Importantly, any
-    and all policy logic will live here. This layer has one sole task of coordinating and interpereting
-    all policy (policy, as in, user defined behavior). As a default, we will include our own, small 
-    suite of overridable/editable plugins. This is to enable maximum configurability for the end user,
-    without requiring them to create a massive config for basic functionality. If possible, the typical
-    browser concept of extensions should live here too, or in an adjacent similar sister layer. We will
-    embed Lua as the primary plugin engine, but at some point I would like to allow for both IPC Based
-    plugins, as well as C++ ABI/FFI's. The latter will be primarily community maintained/created but I
-    personally wouldn't mind making one, for arguments sake, Haskell (FP text search ftw)
+## The four layers
 
-4. ** API Central Routing **
-    The second of the two most important bits. The clarification I wanted to make was this: The other
-    three layers will expose APIs, but not to the end user. They expose them only to this layer. This
-    layer will be where we compile and unify all singular "actions" to be exposed via the user facing
-    configuration API; as well as routing individual commands and queries to and from the relevant 
-    caller/recipients for internal stuff. That is to say, this layer will essentially house all of the
-    "mechanical" logic (as opposed to 'policy' logic) that the program needs to actually coordinate 
-    and execute all of the timing sensitive interactions. The API should ideally be granular, and 
-    include two categories of calls, being "commands" and "queries." Commands should always be fire
-    and forget with simple metadata type args, while queries specifically do NOT actually modify state,
-    only return information. They both should be first class citizens, and by that I mean, internally 
-    at least, you can sort of treat them like whole objects with factories so they can be encapsulated
-    into other behaviors. This doesnt need to be 100% literal, but in effect its more than just "send 
-    some text and off you go."
+```
+cef-backend (daemon process)
+  +------------------+     +-----------------+     +------------------+
+  |   CEF Engine     |     |   API Layer     |     |  Plugin Runtime  |
+  |                  |     |   (Dispatcher)  |     |  (Lua host)      |
+  |  Buffer lifecycle|<--->|  Command/Query  |<--->|  Policy logic    |
+  |  OnPaint capture |     |  routing hub    |     |  Default plugins |
+  |  CEF wrangling   |     |                 |     |  User plugins    |
+  +------------------+     +-----------------+     +------------------+
+                                   ^
+                                   | IPC (Unix domain socket)
+                                   v
+                           +-----------------+
+                           |    Frontend     |
+                           |                 |
+                           |  Kitty renderer |
+                           |  Input capture  |
+                           |  Layout/chrome  |
+                           +-----------------+
+                       cef-frontend (terminal client)
+```
 
-## Diagram 
-                                CEF Backend
-                                    |
-                                    |
-                                    |
-            Frontend ----------- API Layer ------------ Plugin/Lua runtime
+### Layer 1: CEF Engine
+
+The backend's interface to Chromium. Manages browser instances (buffers), handles CEF lifecycle, captures rendered frames via offscreen rendering (OSR). This is the only layer that touches CEF headers.
+
+Responsibilities:
+- CEF initialization, message loop, shutdown
+- Browser creation and destruction
+- Frame capture from `OnPaint` callbacks
+- Registering `buffer.*` command/query handlers with the dispatcher
+
+Does NOT handle: tab management UI, user preferences, plugin coordination, input interpretation.
+
+### Layer 2: API Layer (Dispatcher)
+
+The central routing hub. All cross-layer communication flows through here. The dispatcher maintains a registry of command and query handlers, registered by whichever layer owns them.
+
+Responsibilities:
+- Command dispatch (fire-and-forget actions with metadata args)
+- Query dispatch (read-only requests that return data)
+- Handler registration (any layer can register handlers for its namespace)
+
+Commands and queries are typed objects, not raw strings. They can be composed, queued, intercepted, and wrapped by plugins. This is what makes the system extensible without everything knowing about everything else.
+
+The dispatcher is one-per-process, passed by reference to layers that need to register or invoke handlers. The frontend process has its own dispatcher for frontend-local commands (mode switching, viewport scrolling, etc.) that never cross IPC.
+
+### Layer 3: Plugin Runtime
+
+All policy logic lives here. "Policy" means anything the user might want to configure: keybindings, default URLs, tab behavior, search providers, UI layout rules.
+
+Responsibilities:
+- Embedding Lua 5.4 as the primary plugin engine
+- Loading default and user plugins
+- Bridging Lua calls to/from the C++ dispatcher
+- Providing a `cef` bridge table for plugins to register handlers and emit commands/queries
+
+Future: IPC-based plugins (external processes), C++ FFI plugins.
+
+### Layer 4: Frontend
+
+The terminal client. Renders pixel buffers via the kitty graphics protocol, captures keyboard and mouse input, manages terminal-side chrome (status bar, tab line, command bar).
+
+Responsibilities:
+- Kitty graphics protocol rendering (BGRA to RGBA conversion, base64 encoding, escape sequences)
+- Terminal state management (raw mode, alternate screen, cursor, resize)
+- Input capture and translation to commands
+- Modal UI (normal, insert, command modes)
+
+The frontend does NOT link against CEF. This is enforced at the build level (`target_link_libraries` does not include CEF for the frontend target). Any data the frontend needs from CEF travels over IPC.
+
+## Process model
+
+```
+cef-backend (long-running daemon)
+  |
+  |--- CEF child processes (renderer, GPU, utility — managed by CEF, not us)
+  |
+  |=== Unix domain socket ===> cef-frontend (terminal client, one per terminal)
+  |=== Unix domain socket ===> cef-frontend (another terminal window)
+  |=== Unix domain socket ===> cef-frontend (reattached session)
+```
+
+- Backend and frontend are **separate OS processes**. Non-negotiable.
+- The backend is a **multi-client server**. Multiple frontends can connect simultaneously. This enables detach/reattach (like tmux) and multiple terminal windows viewing the same browser session.
+- CEF itself forks child processes for its renderer, GPU, and utility processes. These are handled by `CefExecuteProcess()` at the very start of `main()` and are not part of our architecture.
+
+## IPC
+
+An abstract `Transport` interface (`src/ipc/transport.h`) decouples the mechanism from the rest of the code.
+
+Current implementation: Unix domain sockets with a binary wire protocol.
+
+Wire format:
+```
+[payload_len:u32][type:u8][id:u32][payload:bytes]
+```
+
+Message types: `COMMAND`, `QUERY`, `COMMAND_RESULT`, `QUERY_RESULT`, `FRAME`.
+
+Commands and queries are serialized using a length-prefixed, little-endian binary format with tagged variant values (`src/ipc/serialization.cc`). FRAME messages carry raw pixel data in the payload with additional metadata (width, height, buffer_id).
+
+Future: shared memory transport for zero-copy frame delivery.
 
 ## Terminology
 
-Buffer      - This is a CEF instance. one single lifetime, and any metadata relevant to it.
+| Term | Meaning |
+|---|---|
+| **Buffer** | One CEF browser instance plus its metadata. Equivalent to a vim buffer. |
+| **Policy** | Logic that could be user preference. Lives in the plugin layer. |
+| **Mechanics** | Internal coordination logic. Lives in the API layer. |
+| **Command** | A fire-and-forget action that crosses layer boundaries. Has a name and optional args. |
+| **Query** | A read-only request that crosses layer boundaries. Returns data without side effects. |
 
-Policy      - Any logic that could be relegated to user preference. If you need to ask the user something,
-              it is policy logic.
+## File organization
 
-Mechanics   - Any logic that is entirely internal. Stuff that the user probably would never want to config
-              themselves.
+```
+src/
+  backend_main.cc           Backend entry point
+  frontend_main.cc          Frontend entry point
+  backend/                  CEF engine (app, client, renderer, engine)
+  api/                      Dispatcher + command/query type definitions
+  ipc/                      Transport abstraction + Unix socket + serialization
+  plugin/                   Plugin host abstraction + Lua runtime
+  frontend/                 Kitty renderer, terminal management, input, layout
+  tests/                    Google Test files
+```
 
-Command     - A single action that must cross boundaries, and optional metadata.
+Rule: one header + implementation pair per major component. CEF headers are only allowed in `src/backend/`.
 
-Query       - A single non-side-effectual query of state/environment.
+## Design decisions and rationale
 
-Internal    - (With regard to API) API interaction that is NOT user facing.
+**Why separate processes for backend and frontend?**
+Decoupling rendering from display allows detach/reattach, multiple views, and crash isolation. The frontend is lightweight — if it crashes, the backend and all browser state survive.
 
-External    - (With regard to API) API interaction that is strictly user defined, expicitly not exposed to
-              internal API.
+**Why a command/query dispatcher instead of direct function calls?**
+Extensibility. Plugins need to intercept, wrap, and register handlers without modifying core code. Typed command/query objects are composable and serializable. The dispatcher is the single point where policy and mechanics meet.
 
-## Summary
+**Why Lua for plugins?**
+Lightweight, embeddable, well-understood. nvim proved the model works for this kind of application. Lua's simplicity is a feature — it keeps plugins focused on policy rather than reimplementing the browser.
 
-So, you may notice, all 4 should be, essentially, completely independant processes that (technically) 
-do not need the others to actually be 'running,' but, as a whole, they complete the vision. Total and
-absolute separation of concerns with an iron fist will be the most important design philosophy here; 
-and these splits will be the first thing that gets implemented, at least at a basic level so that 
-future additions have very exact locations to be added, and methods to interact. Additionally, we will
-borrow philosophically from Nix, as a concept, and focus on declarativity, explicivity, and reproducability.
-We also should dedicate equal focus to clear, unambiguous, and beginner friendly logging and documentation.
-(though, not to go as far as being pedantic, I doubt true noobs would find/want this browser. This is,
-clearly, a browser targetsd at devs/terminal power users)
+**Why offscreen rendering?**
+We don't want X11/GTK windows. The terminal is our display. CEF's OSR mode gives us raw pixel buffers that we can send anywhere — in our case, encoded as kitty graphics protocol escape sequences.
 
-This document may change slightly as I learn and grow, but should remain the general founding doctrine/vision
-statement for the browser at large. Claude should ask questions when needed, and take notes in his own
-CLAUDE.md.
-
+**Why kitty graphics protocol specifically?**
+It's the most capable terminal graphics protocol available: supports direct pixel data, image placement, and animation. Supported by kitty, WezTerm, Ghostty, and others. Sixel is an alternative but has lower resolution and fewer features.
