@@ -4,40 +4,38 @@
 // ============================================================================
 #include "terminal.h"
 
-// #include <csignal>
+#include <csignal>
 #include <iostream>
-// #include <memory>
+#include <memory>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
 namespace cef_terminal {
 
-struct termios original;
-
-// See terminal.h line 150
-// std::unique_ptr<Terminal> Terminal::create() {
-Terminal *Terminal::create() {
-  // auto t = std::unique_ptr<Terminal>(new Terminal());
-  Terminal *t = new Terminal();
+std::unique_ptr<Terminal, void (*)(Terminal *)> Terminal::create() {
+  auto t = std::unique_ptr<Terminal, void (*)(Terminal *)>(new Terminal,
+                                                           &Terminal::destroy);
   if (!t->setup()) {
-    return nullptr;
+    return {nullptr, &Terminal::destroy};
   }
   return t;
 }
 
 bool Terminal::setup() {
 
-  // Alternate Buffer
-  std::cout << "\033[?1049h";
+  std::cout << CLS;
+  std::cout << ENTR_ALTRN_BUF;
+  std::cout << CRSR_HOME;
+  std::cout << CRSR_HIDE;
 
-  // Hide cursor
-  std::cout << "\033[?25l";
+  std::cout.flush();
 
   // Set Raw and flags
-  if (tcgetattr(STDIN_FILENO, &original_) != 0)
+  if (tcgetattr(STDIN_FILENO, &original_) != 0) {
     return false;
-  else {
+  } else {
+
     raw_ = original_;
     raw_.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
 
@@ -49,12 +47,25 @@ bool Terminal::setup() {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_);
 
     setup_done_ = true;
+
     return true;
   }
 }
 
-void Terminal::teardown() { tcsetattr(STDIN_FILENO, TCSANOW, &original_); }
+void Terminal::destroy(Terminal *t) {
 
-void refresh_size() {}
+  // Reset original term state
+  tcsetattr(STDIN_FILENO, TCSANOW, &t->original_);
+  std::cout << CRSR_SHOW;
+  std::cout << EXT_ALTRN_BUF;
+  std::cout.flush();
+
+  delete t;
+}
+
+void Terminal::refresh_size() {
+  cols_ = 0;
+  rows_ = 0;
+}
 
 } // namespace cef_terminal

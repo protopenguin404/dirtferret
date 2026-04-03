@@ -143,25 +143,27 @@
 // ============================================================================
 #pragma once
 
-#define ENTR_ALTRN_BUF "\033[?1049h"
+// Why do they flip the 'l' and 'h' here? so confusing lol
 #define CRSR_HIDE "\033[?25l"
+#define CRSR_SHOW "\033[?25h"
+#define CRSR_HOME "\033[H"
+#define ENTR_ALTRN_BUF "\033[?1049h"
 #define EXT_ALTRN_BUF "\033[?1049l"
+#define CLS "\033[2J"
 
-// #include <memory> // See line 161
+#include <memory>
 #include <termios.h>
 
 namespace cef_terminal {
 
 class Terminal {
 public:
-  ~Terminal() { teardown(); }
   Terminal(const Terminal &) = delete;            // non-copyable
   Terminal &operator=(const Terminal &) = delete; // non-copyable
 
-  // static std::unique_ptr<Terminal> create(); // use raw poiter to make sure
-  // she works
-  static Terminal *create();
-  void teardown();
+  static std::unique_ptr<Terminal, void (*)(Terminal *)> create();
+  static void destroy(Terminal *t);
+  void refresh_size();
 
   int cols() const { return cols_; }
   int rows() const { return rows_; }
@@ -170,6 +172,7 @@ public:
 
 private:
   Terminal() = default;
+  ~Terminal() = default;
   bool setup();
   struct termios original_;
   struct termios raw_;
