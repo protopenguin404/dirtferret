@@ -37,6 +37,39 @@
 //      is hosed (no echo, no line editing). That's why teardown() matters
 //      and why signal handling matters.
 //
+/////////////////////////////////////////////////////////////////////
+//
+//            Example from termios docs:
+//
+//              The following attributes changes the terminal attributes.
+//
+//            *⁄
+//           #define _POSIX_SOURCE
+//           #include <termios.h>
+//           #include <unistd.h>
+//           #include <stdio.h>
+//
+//           main() {
+//             struct termios term1, term2;
+//
+//             if (tcgetattr(STDIN_FILENO, &term1) != 0)
+//               perror("tcgetattr() error");
+//             else {
+//               printf("the original end-of-file character is x'%02x'\n",
+//                      term1.c_cc[VEOF]);
+//               term1.c_cc[VEOF] = 'z';
+//               if (tcsetattr(STDIN_FILENO, TCSANOW, &term1) != 0)
+//                 perror("tcsetattr() error");
+//               if (tcgetattr(STDIN_FILENO, &term1) != 0)
+//                 perror("tcgetattr() error");
+//               else
+//                 printf("the new end-of-file character is x'%02x'\n",
+//                        term1.c_cc[VEOF]);
+//             }
+//           }
+//
+////////////////////////////////////////////////////////////////////////////
+///
 //   4. Query terminal size and store it.
 //      HINT: ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws)
 //      The winsize struct has: ws_col, ws_row, ws_xpixel, ws_ypixel
@@ -110,12 +143,41 @@
 // ============================================================================
 #pragma once
 
+#define ENTR_ALTRN_BUF "\033[?1049h"
+#define CRSR_HIDE "\033[?25l"
+#define EXT_ALTRN_BUF "\033[?1049l"
+
+// #include <memory> // See line 161
 #include <termios.h>
 
 namespace cef_terminal {
 
 class Terminal {
-    // YOUR IMPLEMENTATION HERE
+public:
+  ~Terminal() { teardown(); }
+  Terminal(const Terminal &) = delete;            // non-copyable
+  Terminal &operator=(const Terminal &) = delete; // non-copyable
+
+  // static std::unique_ptr<Terminal> create(); // use raw poiter to make sure
+  // she works
+  static Terminal *create();
+  void teardown();
+
+  int cols() const { return cols_; }
+  int rows() const { return rows_; }
+  int pixel_height() const { return pixel_h_; }
+  int pixel_width() const { return pixel_w_; }
+
+private:
+  Terminal() = default;
+  bool setup();
+  struct termios original_;
+  struct termios raw_;
+  int cols_;
+  int rows_;
+  int pixel_w_;
+  int pixel_h_;
+  bool setup_done_;
 };
 
-}  // namespace cef_terminal
+} // namespace cef_terminal
