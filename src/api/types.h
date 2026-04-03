@@ -1,12 +1,21 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <variant>
 #include <vector>
 
 namespace cef_terminal {
+
+// Forward declarations for handler function types.
+// Defined here (not in dispatcher.h) so exports.h can use them without
+// pulling in the dispatcher.
+struct Command;
+struct Query;
+struct CommandResult;
+struct QueryResult;
 
 // Value type for command/query arguments and results.
 // Covers all common payload types. Binary data (e.g., pixel buffers)
@@ -39,5 +48,9 @@ struct QueryResult {
     static QueryResult success(Args d = {}) { return {true, {}, std::move(d)}; }
     static QueryResult failure(std::string msg) { return {false, std::move(msg), {}}; }
 };
+
+// Handler function types — used by both the Dispatcher and ExportManifest.
+using CommandHandler = std::function<CommandResult(const Command&)>;
+using QueryHandler = std::function<QueryResult(const Query&)>;
 
 }  // namespace cef_terminal

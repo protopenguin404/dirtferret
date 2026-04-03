@@ -93,6 +93,15 @@ target_include_directories(test-serialization PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(test-serialization GTest::gtest GTest::gtest_main)
 add_test(NAME serialization COMMAND test-serialization)
 
+# Test target: runtime exports system.
+add_executable(test-exports
+  tests/test_exports.cc
+  ${SHARED_SRCS}
+  )
+target_include_directories(test-exports PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test-exports GTest::gtest GTest::gtest_main)
+add_test(NAME exports COMMAND test-exports)
+
 # Test target: FRAME wire format (needs transport extension).
 # Won't pass until you extend send()/try_parse_message() for FRAME metadata.
 add_executable(test-frame-wire

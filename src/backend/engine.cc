@@ -50,8 +50,17 @@ void Engine::shutdown() {
     }
 }
 
-void Engine::register_handlers(Dispatcher& dispatcher) {
-    dispatcher.register_command("buffer.navigate",
+ExportManifest Engine::exports() {
+    ExportManifest manifest;
+    manifest.ns = "buffer";
+    manifest.description = "Browser buffer management — navigation, titles, lifecycle.";
+
+    // --- Commands ---
+
+    manifest.commands.push_back({
+        "navigate",
+        "Navigate the active buffer to a URL.",
+        {{"url", "string", true, "The URL to load."}},
         [this](const Command& cmd) -> CommandResult {
             auto client = app_->client();
             if (!client || !client->browser()) {
@@ -71,9 +80,16 @@ void Engine::register_handlers(Dispatcher& dispatcher) {
             std::cerr << "[cef] Navigating to: " << *url << std::endl;
             client->browser()->GetMainFrame()->LoadURL(*url);
             return CommandResult::success();
-        });
+        }
+    });
 
-    dispatcher.register_query("buffer.get_title",
+    // --- Queries ---
+
+    manifest.queries.push_back({
+        "get_title",
+        "Get the current page title of the active buffer.",
+        {},  // no args
+        {{"title", "string", true, "The page title."}},
         [this](const Query&) -> QueryResult {
             auto client = app_->client();
             if (!client) {
@@ -83,7 +99,48 @@ void Engine::register_handlers(Dispatcher& dispatcher) {
             Args data;
             data["title"] = client->title();
             return QueryResult::success(std::move(data));
-        });
+        }
+    });
+
+    // --- Events (declared, not yet wired) ---
+
+    manifest.events.push_back({
+        "load_finished",
+        "Fired when a page finishes loading.",
+        {{"url", "string", true, "The URL that finished loading."},
+         {"status_code", "int", true, "HTTP status code."}}
+    });
+
+    manifest.events.push_back({
+        "title_changed",
+        "Fired when the page title changes.",
+        {{"title", "string", true, "The new title."}}
+    });
+
+    // --- Properties ---
+
+    manifest.properties.push_back({
+        "title",
+        "The current page title.",
+        "string",
+        false,  // read-only
+        [this](const Query&) -> QueryResult {
+            auto client = app_->client();
+            if (!client) {
+                return QueryResult::failure("no client available");
+            }
+            Args data;
+            data["value"] = client->title();
+            return QueryResult::success(std::move(data));
+        },
+        nullptr  // no setter
+    });
+
+    return manifest;
+}
+
+void Engine::register_handlers(Dispatcher& dispatcher) {
+    dispatcher.register_exports(exports());
 }
 
 } // namespace cef_terminal

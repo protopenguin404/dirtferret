@@ -1,5 +1,6 @@
 #pragma once
 
+#include "api/exports.h"
 #include "backend/app.h"
 #include "include/cef_app.h"
 
@@ -37,6 +38,9 @@ class Engine {
 
     // Shut down CEF cleanly.
     void shutdown();
+
+    // Build the export manifest for this component.
+    ExportManifest exports();
 
     // Register buffer.* commands and queries with the dispatcher.
     void register_handlers(Dispatcher& dispatcher);

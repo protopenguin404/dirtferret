@@ -48,13 +48,13 @@ If you have CMake expertise and want to help clean this up, that would be a very
 ```
 flake.nix               Nix devshell definition
 CMakeLists.txt          Root CMake config (CEF's, with our target added)
-ARCHITECTURE.md         Design rationale and 4-layer model
+ARCHITECTURE.md         Design rationale, runtime exports, and 4-layer model
 src/
   backend_main.cc       Backend entry point (daemon process)
   frontend_main.cc      Frontend entry point (terminal client)
   backend/              CEF engine layer (app, client, renderer, engine)
   frontend/             Terminal renderer, input capture, layout
-  api/                  Command/query dispatcher and type definitions
+  api/                  Dispatcher, export types, command/query definitions
   ipc/                  Transport abstraction + Unix socket implementation
   plugin/               Plugin host abstraction + Lua runtime
   tests/                Google Test files
@@ -80,6 +80,7 @@ cd workspace/build/src/Release
 # Run tests:
 cd workspace/build
 ninja test-serialization && src/test-serialization    # IPC round-trip tests
+ninja test-exports && src/test-exports                # runtime export system tests
 ninja test-frame-wire && src/test-frame-wire          # frame wire format tests
 ninja test-frontend && src/test-frontend              # terminal + renderer tests
 ctest --output-on-failure                             # run all tests
@@ -93,8 +94,20 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full design. The short version:
 
 - **4 layers:** CEF engine, API dispatcher, plugin runtime, terminal frontend
 - **2 processes:** Backend (daemon) and frontend (terminal client), connected via Unix domain socket IPC
-- **Commands** are fire-and-forget actions. **Queries** are read-only information requests. Both are typed objects routed through the dispatcher.
+- **Runtime exports:** Each component declares an `ExportManifest` — a structured set of commands, queries, events, properties, and references that it offers to the system. The dispatcher collects these and provides dispatch + introspection.
+- **Commands** are fire-and-forget actions. **Queries** are read-only information requests. **Events** are notifications. **Properties** are observable state. All are typed objects routed through the dispatcher.
 - The backend is a multi-client server. Multiple frontends can connect to the same backend (enables detach/reattach, multiple terminal windows).
+
+### Adding new functionality
+
+When adding a new capability to any component:
+
+1. Define the export in the component's `exports()` method — add a `CommandExport`, `QueryExport`, `EventExport`, or `PropertyExport` to the manifest.
+2. The handler lives right there in the export declaration, next to the metadata.
+3. The dispatcher indexes it automatically when `register_exports()` is called.
+4. No central routing table to update. No wiring in a separate file.
+
+See `src/backend/engine.cc` for a working example of how the `buffer.*` namespace is declared.
 
 ## Code conventions
 
@@ -114,14 +127,24 @@ Tests serve as the spec — if a test compiles and passes, the implementation sa
 
 Tests do **not** link against CEF. We only unit-test our own code.
 
+Current test targets:
+
+| Target | What it tests |
+|---|---|
+| `test-serialization` | IPC binary serialization round-trips |
+| `test-exports` | Runtime export registration, dispatch, properties, introspection |
+| `test-frame-wire` | FRAME message wire format |
+| `test-frontend` | Terminal + KittyRenderer |
+
 ## What needs help
 
 Roughly in priority order:
 
 1. **Frame delivery pipeline** — capturing pixels from CEF's OnPaint, sending them over IPC, rendering via kitty graphics protocol. This is the critical proof-of-concept milestone.
-2. **Terminal input handling** — reading keyboard/mouse events in raw mode, dispatching them as commands.
-3. **CMake cleanup** — decoupling our build from CEF's distribution CMakeLists.
-4. **Wire format extension** — the IPC transport needs to carry frame metadata (width, height, buffer_id) for FRAME messages.
-5. **Lua plugin bridging** — the runtime initializes but can't actually dispatch commands/queries yet.
+2. **Event subscription system** — events are declared in export manifests but there's no subscribe/emit mechanism yet.
+3. **Terminal input handling** — reading keyboard/mouse events in raw mode, dispatching them as commands.
+4. **CMake cleanup** — decoupling our build from CEF's distribution CMakeLists.
+5. **Wire format extension** — the IPC transport needs to carry frame metadata (width, height, buffer_id) for FRAME messages.
+6. **Lua plugin bridging** — the runtime initializes but can't actually dispatch commands/queries yet. Plugins should be able to introspect the export surface and subscribe to events.
 
 If you're interested in contributing, open an issue to discuss before writing a large PR. The architecture is intentional and we'd rather discuss design before implementation.
