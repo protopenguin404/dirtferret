@@ -1,102 +1,156 @@
 {
+  description = "CEF terminal browser — build environment";
+
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
   };
+
   outputs = {
     self,
     nixpkgs,
-  } @ inputs: {
-    devShells.x86_64-linux.default = let
-      system = "x86_64-linux";
-      pkgs = import nixpkgs {
-        inherit system;
-        config.allowUnfree = true;
-      };
-      cef = pkgs.cef-binary;
-    in
-      pkgs.mkShell {
-        buildInputs = with pkgs; [
-          cmake
-          ninja
-          pkg-config
-          libx11
-          libxcomposite
-          libxdamage
-          libxext
-          libxfixes
-          libxrandr
-          libxcb
-          nss
-          nspr
-          at-spi2-core
-          cups
-          libxkbcommon
-          mesa
-          libglvnd
-          glib
-          dbus
-          expat
-          cairo
-          pango
-          alsa-lib
-          lua5_4
-          gtest
-          claude-code
-          claude-mergetool
-          claude-code-router
-        ];
+  } @ inputs: let
+    system = "x86_64-linux";
+    pkgs = import nixpkgs {
+      inherit system;
+      config.allowUnfree = true;
+    };
 
-        CEF_STORE = "${cef}";
+    # Chromium/CEF build dependencies (from install-build-deps.py).
+    chromiumDeps = with pkgs; [
+      # ── Core build tooling ──
+      cmake
+      ninja
+      pkg-config
+      autoconf
+      binutils
+      bison
+      flex
+      gperf
+      patch
+      perl
+      python3
+      ruby
+      git
 
-        shellHook = ''
-          PROJ="$PWD"
-          WS="$PROJ/workspace"
-          CEF_ROOT="${cef}"
+      # ── Compression / archiving ──
+      bzip2
+      p7zip
+      xz
+      zip
+      zstd
+      zlib
 
-          _assemble_workspace() {
-            # Remove stale workspace if present (from a crashed session, etc.)
-            rm -rf "$WS"
-            mkdir -p "$WS"
+      # ── System / IPC libs ──
+      dbus
+      elfutils
+      fakeroot
+      libcap
+      libffi
+      linux-pam
+      lksctp-tools
+      openssl
+      sqlite
+      systemd
+      util-linux
 
-            # Ensure persistent build dir exists at repo root.
-            mkdir -p "$PROJ/build"
+      # ── Graphics / display ──
+      cairo
+      fontconfig
+      freetype
+      libdrm
+      libglvnd
+      libGLU
+      libpng
+      libjpeg
+      libva
+      mesa
+      pango
+      pixman
+      vulkan-loader
+      wayland
+      gtk3
 
-            # FIRST: inject our source, build config, and build cache (real project files).
-            ln -s "$PROJ/src" "$WS/src"
-            ln -s "$PROJ/CMakeLists.txt" "$WS/CMakeLists.txt"
-            ln -s "$PROJ/build" "$WS/build"
+      # ── X11 / Xorg ──
+      libx11
+      libxcb
+      libxcomposite
+      libxdamage
+      libxext
+      libxfixes
+      libxrandr
+      libxkbcommon
+      libxshmfence
+      libxscrnsaver
+      libxt
+      libxtst
+      libxau
+      libxcursor
+      libxdmcp
+      libxi
+      libxinerama
+      libxrender
+      xcb-util-cursor
+      xorg-server
 
-            # SECOND: overlay CEF library dirs from the nix store (read-only symlinks).
-            for item in include libcef_dll cmake Release Resources; do
-              ln -s "$CEF_ROOT/$item" "$WS/$item"
-            done
+      # ── Input / accessibility / misc device ──
+      at-spi2-core
+      bluez
+      brltty
+      libevdev
+      libinput
+      ncurses
+      speechd
 
-            echo "[workspace] Ready at $WS (symlinked)"
-          }
+      # ── Audio / network / crypto ──
+      alsa-lib
+      cups
+      curl
+      glib
+      krb5
+      nss
+      nspr
+      pciutils
+      pulseaudio
 
-          _cleanup_workspace() {
-            if [ -d "$WS" ]; then
-              rm -rf "$WS"
-              echo "[workspace] Cleaned up."
-            fi
-          }
+      # ── Misc CLI tools (used by chromium build scripts) ──
+      fd
+      file
+      fuse
+      libxslt
+      lsb-release
+      procps
+      ripgrep
+      wdiff
+      expat
+    ];
 
-          _assemble_workspace
+    # Our project's own dependencies (on top of Chromium's).
+    projectDeps = with pkgs; [
+      lua5_4
+      gtest
 
-          # Hand off to fish. Cleanup runs after fish exits (bash resumes here).
-          fish -C "
-            set -gx PROJ $PROJ
-            set -gx WS $WS
-            set -gx CEF_ROOT $CEF_ROOT
+    ];
+  in {
+    devShells.${system}.default =
+      # buildFHSEnv creates a bubblewrap sandbox with standard FHS layout
+      # (/lib64/ld-linux-x86-64.so.2, /usr/lib, etc). Required on NixOS
+      # because depot_tools downloads prebuilt binaries (cipd, gn, clang,
+      # reclient) that are dynamically linked against FHS paths.
+      #
+      # On non-NixOS distros this is unnecessary — deps come from the
+      # system package manager and sync.sh / build.sh run directly.
+      (pkgs.buildFHSEnv {
+        name = "cef-env";
 
-            function build-cef; $PROJ/scripts/build-cef.sh; end
-            function run; $PROJ/scripts/run.sh; end
-          "
+        targetPkgs = pkgs: chromiumDeps ++ projectDeps;
 
-          # Fish exited — clean up workspace and exit bash too.
-          _cleanup_workspace
-          exit
+        profile = ''
+          export PATH="$PWD/depot_tools:$PATH"
+          export CEF_BUILD_ROOT="$PWD"
         '';
-      };
+
+        runScript = "bash";
+      })
+      .env;
   };
 }
