@@ -106,6 +106,14 @@ in
       cp -a ${buildType} $out/Release
       cp -a Resources $out/
 
+      # CEF resolves resources relative to libcef.so (via /proc/self/exe fallback
+      # to DIR_MODULE). On NixOS, libcef.so lives in Release/ but resources are
+      # in Resources/. Symlink everything CEF needs into Release/.
+      for f in $out/Resources/*.pak $out/Resources/icudtl.dat; do
+        ln -s "$f" "$out/Release/$(basename "$f")"
+      done
+      ln -s $out/Resources/locales $out/Release/locales
+
       runHook postInstall
     '';
 

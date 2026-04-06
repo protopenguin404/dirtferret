@@ -15,7 +15,11 @@ target_link_libraries(test-schema PRIVATE
 add_test(NAME test-schema COMMAND test-schema)
 
 # --- test-shm: shared memory frame pool tests ---
-add_executable(test-shm test_shm.cc)
+add_executable(
+  test-shm
+  test_shm.cc
+  ${CMAKE_SOURCE_DIR}/core/shm/frame_pool.cc
+)
 target_include_directories(test-shm PRIVATE
   ${CMAKE_SOURCE_DIR}/core
 )
@@ -24,6 +28,20 @@ target_link_libraries(test-shm PRIVATE
   rt
 )
 add_test(NAME test-shm COMMAND test-shm)
+
+# # --- test-rpc: RPC server fundamentals (no CEF, no capnp runtime) ---
+# add_executable(
+#   test-rpc
+#   test_rpc.cc
+#   ${CMAKE_SOURCE_DIR}/core/rpc/rpc_server.cc
+# )
+# target_include_directories(test-rpc PRIVATE
+#   ${CMAKE_SOURCE_DIR}/core
+# )
+# target_link_libraries(test-rpc PRIVATE
+#   GTest::gtest_main
+# )
+# add_test(NAME test-rpc COMMAND test-rpc)
 
 # --- test-input: terminal-to-CEF input translation tests ---
 add_executable(test-input test_input.cc)

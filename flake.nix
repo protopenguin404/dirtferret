@@ -85,6 +85,7 @@
           cmake -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCEF_ROOT="$CEF_ROOT" \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
             ..
           ninja "$@"
           cd ..

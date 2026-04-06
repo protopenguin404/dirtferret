@@ -10,7 +10,6 @@ result-*
 
 # CEF binary distribution (comes from nix store)
 # These may appear if someone unpacks CEF manually
-Release/
 Resources/
 include/
 libcef_dll/
@@ -41,3 +40,10 @@ workspace/
 # Cap'n Proto generated files (in build dir, not tracked)
 *.capnp.h
 *.capnp.c++
+
+# Caches/temp files
+Release/
+Testing/
+Temporary/
+.cache/
+
