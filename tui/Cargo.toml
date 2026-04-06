@@ -30,7 +30,7 @@ bytemuck = "1"
 capnpc = "0.20"
 
 [dev-dependencies]
-# Testing utilities
+pretty_assertions = "1"
 
 [[bin]]
 name = "dirtferret-tui"

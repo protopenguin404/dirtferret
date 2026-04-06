@@ -53,6 +53,75 @@ pub fn kitty_delete_image(image_id: u32) -> Vec<u8> {
     format!("\x1b_Ga=d,d=i,i={}\x1b\\", image_id).into_bytes()
 }
 
+/// Generate a kitty graphics escape sequence for direct inline display.
+/// Handles chunked transfer for payloads > 4096 bytes.
+///
+/// `pixels` must already be RGBA format.
+pub fn kitty_direct_display(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    image_id: u32,
+    cols: u16,
+    rows: u16,
+) -> Vec<u8> {
+    use std::fmt::Write;
+
+    let b64 = base64_encode(pixels);
+    let mut output = String::new();
+    let chunk_size = 4096;
+
+    if b64.len() <= chunk_size {
+        write!(
+            output,
+            "\x1b_Ga=T,f=32,s={},v={},i={},c={},r={},C=1;{}\x1b\\",
+            width, height, image_id, cols, rows, b64
+        ).unwrap();
+    } else {
+        let chunks: Vec<&[u8]> = b64.as_bytes().chunks(chunk_size).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let m = if i < chunks.len() - 1 { 1 } else { 0 };
+            let chunk_str = std::str::from_utf8(chunk).unwrap();
+            if i == 0 {
+                write!(
+                    output,
+                    "\x1b_Ga=T,f=32,s={},v={},i={},c={},r={},C=1,m={};{}\x1b\\",
+                    width, height, image_id, cols, rows, m, chunk_str
+                ).unwrap();
+            } else {
+                write!(output, "\x1b_Gm={};{}\x1b\\", m, chunk_str).unwrap();
+            }
+        }
+    }
+
+    output.into_bytes()
+}
+
+/// Simple base64 encoder (no external dep needed for tests).
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[((n >> 18) & 0x3F) as usize] as char);
+        result.push(CHARS[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(CHARS[((n >> 6) & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(CHARS[(n & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +184,76 @@ mod tests {
         assert!(s.starts_with("\x1b_G"));
         assert!(s.contains("a=d"));
         assert!(s.contains("i=42"));
+    }
+
+    // --- Direct display (inline base64) ---
+
+    #[test]
+    fn direct_display_small_image() {
+        // 1x1 RGBA pixel (4 bytes) — well under 4096 chunk limit
+        let pixels = vec![255u8, 0, 0, 255]; // red pixel
+        let seq = kitty_direct_display(&pixels, 1, 1, 1, 1, 1);
+        let s = String::from_utf8(seq).unwrap();
+
+        assert!(s.starts_with("\x1b_G"));
+        assert!(s.contains("a=T"));
+        assert!(s.contains("f=32"));
+        assert!(s.contains("s=1"));
+        assert!(s.contains("v=1"));
+        // Should be a single chunk (no m= param, or m=0 implicitly)
+        assert!(!s.contains("m=1"));
+    }
+
+    #[test]
+    fn direct_display_large_image_is_chunked() {
+        // Make a payload that exceeds 4096 base64 chars
+        // 4096 base64 chars = 3072 bytes of raw data
+        // So 3100 bytes should produce a chunked transfer
+        let pixels = vec![128u8; 3100];
+        let seq = kitty_direct_display(&pixels, 100, 8, 1, 50, 4);
+        let s = String::from_utf8(seq).unwrap();
+
+        // Should contain m=1 (more data) and m=0 (last chunk)
+        assert!(s.contains("m=1"));
+        assert!(s.contains("m=0"));
+
+        // First chunk has the image params
+        assert!(s.contains("a=T"));
+        assert!(s.contains("s=100"));
+    }
+
+    // --- Base64 encoding ---
+
+    #[test]
+    fn base64_encode_basic() {
+        assert_eq!(base64_encode(b"Hello"), "SGVsbG8=");
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+    }
+
+    // --- BGRA conversion preserves alpha ---
+
+    #[test]
+    fn bgra_to_rgba_preserves_alpha() {
+        let mut pixels = vec![
+            0, 0, 255, 128,   // semi-transparent red (in BGRA)
+        ];
+        bgra_to_rgba(&mut pixels);
+        assert_eq!(pixels[3], 128); // alpha unchanged
+        assert_eq!(pixels[0], 255); // R (was at position 2)
+    }
+
+    // --- Partial pixel buffer (not multiple of 4) ---
+
+    #[test]
+    fn bgra_to_rgba_ignores_trailing_bytes() {
+        // chunks_exact_mut skips trailing bytes that don't form a full pixel
+        let mut pixels = vec![0, 128, 255, 255, 99, 99]; // 4 bytes + 2 trailing
+        bgra_to_rgba(&mut pixels);
+        assert_eq!(pixels[0], 255); // B and R swapped in first pixel
+        assert_eq!(pixels[4], 99);  // trailing bytes untouched
+        assert_eq!(pixels[5], 99);
     }
 }

@@ -1,5 +1,7 @@
 mod app;
+mod buffer;
 mod input;
+mod rpc;
 mod viewport;
 
 // Cap'n Proto generated code
