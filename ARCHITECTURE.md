@@ -1,236 +1,268 @@
 # Architecture
 
-This document describes the design of cef-terminal: the process model, layer responsibilities, communication patterns, and key terminology. It is the founding vision document. Implementation details change; the principles here should not (or at least, not without good reason).
+dirtferret is a terminal-based web browser built on CEF (Chromium Embedded Framework). CEF runs as a headless renderer producing raw pixel buffers. A Rust terminal client displays them via the kitty graphics protocol. The result is a full Chromium browser inside your terminal.
 
-## Design principles
+The architecture follows Neovim's model: a headless core process exposes a typed RPC interface. UIs, plugins, and external tools all consume the same API. The core is a programmable browser kernel; the terminal client is just one possible frontend.
 
-- **Separation of concerns with an iron fist.** Each layer has one job. Cross-layer communication goes through the API dispatcher, never through direct calls.
-- **Composition over inheritance.** Except where CEF requires subclassing, prefer composable interfaces and dependency injection.
-- **Declarative and explicit.** Borrowing philosophically from Nix: reproducible, declarative configuration. No magic globals, no implicit state.
-- **Policy vs. mechanics.** If the user might want to configure it, it's policy and lives in the plugin layer. If it's internal coordination, it's mechanical and lives in the API layer.
-- **Components declare their surface.** Every major component declares what it offers to the system as a structured manifest of runtime exports. The system's command surface is emergent, not centrally authored.
+## Design Principles
 
-## The four layers
+**Neovim's kernel model.** The core is headless and UI-agnostic. All state lives in the core. UIs are stateless renderers that receive events and send input. Multiple UIs can connect simultaneously (detach/reattach, multiple terminals, external tools).
 
-```
-cef-backend (daemon process)
-  +------------------+     +-----------------+     +------------------+
-  |   CEF Engine     |     |   API Layer     |     |  Plugin Runtime  |
-  |                  |     |   (Dispatcher)  |     |  (Lua host)      |
-  |  Buffer lifecycle|<--->|  Export registry |<--->|  Policy logic    |
-  |  OnPaint capture |     |  Command/Query  |     |  Default plugins |
-  |  CEF wrangling   |     |  routing hub    |     |  User plugins    |
-  +------------------+     +-----------------+     +------------------+
-                                   ^
-                                   | IPC (Unix domain socket)
-                                   v
-                           +-----------------+
-                           |    Frontend     |
-                           |                 |
-                           |  Kitty renderer |
-                           |  Input capture  |
-                           |  Layout/chrome  |
-                           +-----------------+
-                       cef-frontend (terminal client)
-```
+**Schema-driven API.** [Cap'n Proto](https://capnproto.org/) defines the entire API surface as `.capnp` schema files. The schema is the single source of truth for what the core offers. From it, we generate C++ server code, Rust client code, and Lua bindings. Introspection is built in — any client can discover the full API at runtime by reading the schema.
 
-### Layer 1: CEF Engine
+**Zero-copy frame delivery.** Pixel data from CEF's `OnPaint` goes into shared memory. Cap'n Proto RPC carries only the metadata (dimensions, dirty rectangles, shm reference). The terminal client reads pixels directly from shared memory and sends them to the terminal via the kitty graphics protocol's shared memory mode (`t=s`). Pixels are never serialized or copied through the RPC layer.
 
-The backend's interface to Chromium. Manages browser instances (buffers), handles CEF lifecycle, captures rendered frames via offscreen rendering (OSR). This is the only layer that touches CEF headers.
+**Composition over inheritance.** Outside of CEF's required handler subclassing, prefer interfaces, callbacks, and dependency injection. Design every component for composability.
 
-Responsibilities:
-- CEF initialization, message loop, shutdown
-- Browser creation and destruction
-- Frame capture from `OnPaint` callbacks
-- Declaring its runtime exports (the `buffer.*` namespace) via an `ExportManifest`
+**Policy in plugins, mechanics in the core.** If the user might want to configure it — keybindings, default URLs, tab behavior, ad blocking rules — it is policy and belongs in a Lua plugin. If it is internal coordination or timing, it is mechanical and belongs in the core.
 
-Does NOT handle: tab management UI, user preferences, plugin coordination, input interpretation.
-
-### Layer 2: API Layer (Dispatcher + Export Registry)
-
-The central routing hub. All cross-layer communication flows through here. The dispatcher collects runtime exports from components, indexes them by fully-qualified name, and provides dispatch and introspection.
-
-Responsibilities:
-- Collecting `ExportManifest` declarations from all components
-- Command dispatch (fire-and-forget actions with metadata args)
-- Query dispatch (read-only requests that return data)
-- Property access (auto-generated get/set pairs from property exports)
-- Introspection (any consumer can discover the full command surface at runtime)
-
-The dispatcher does not define the command vocabulary — it indexes it. Each component declares what it offers; the dispatcher aggregates. This means adding new capabilities to the system requires changes only in the component that owns them.
-
-Commands, queries, events, and properties are typed objects, not raw strings. They can be composed, queued, intercepted, and wrapped by plugins. This is what makes the system extensible without everything knowing about everything else.
-
-The dispatcher is one-per-process, passed by reference to layers that need to register or invoke handlers. The frontend process has its own dispatcher for frontend-local exports (mode switching, viewport scrolling, etc.) that never cross IPC.
-
-### Layer 3: Plugin Runtime
-
-All policy logic lives here. "Policy" means anything the user might want to configure: keybindings, default URLs, tab behavior, search providers, UI layout rules.
-
-The Plugin Runtime is the **control flow layer**. Runtime exports provide the vocabulary — commands, queries, events, properties — but they don't define how those pieces compose into behavior. That's what plugins do. A plugin might listen to `buffer.load_finished` events and conditionally dispatch `buffer.navigate` commands based on URL patterns. The exports are the nouns and verbs; plugins write the sentences.
-
-Responsibilities:
-- Embedding Lua 5.4 as the primary plugin engine
-- Loading default and user plugins
-- Bridging Lua calls to/from the C++ dispatcher
-- Providing a `cef` bridge table for plugins to register handlers and emit commands/queries
-- Declaring its own runtime exports (the `plugin.*` namespace) for plugin management
-- Subscribing to events from other components and composing behavior from the export surface
-
-Future: IPC-based plugins (external processes), C++ FFI plugins.
-
-### Layer 4: Frontend
-
-The terminal client. Renders pixel buffers via the kitty graphics protocol, captures keyboard and mouse input, manages terminal-side chrome (status bar, tab line, command bar).
-
-Responsibilities:
-- Kitty graphics protocol rendering (BGRA to RGBA conversion, base64 encoding, escape sequences)
-- Terminal state management (raw mode, alternate screen, cursor, resize)
-- Input capture and translation to commands
-- Modal UI (normal, insert, command modes)
-- Declaring its own runtime exports (the `frontend.*` namespace) for terminal state and input
-
-The frontend does NOT link against CEF. This is enforced at the build level (`target_link_libraries` does not include CEF for the frontend target). Any data the frontend needs from CEF travels over IPC.
-
-## Runtime exports
-
-The system's command surface is built from **runtime exports** — structured declarations that each component makes about what it offers to the rest of the system. Think of it as an access modifier beyond `public`: a component's runtime exports are the subset of its functionality that it deliberately exposes to the broader architecture.
-
-### Export types
-
-Each component declares an `ExportManifest` containing some or all of these:
-
-| Export type | What it is | Example |
-|---|---|---|
-| **Command** | Fire-and-forget action that may modify state | `buffer.navigate`, `buffer.close` |
-| **Query** | Read-only request that returns data | `buffer.get_title`, `buffer.list` |
-| **Event** | Notification the component emits | `buffer.load_finished`, `buffer.title_changed` |
-| **Property** | Observable state with get (and optionally set) | `buffer.title` (read-only), `buffer.zoom_level` (read-write) |
-| **Reference** | Pointer to a related export namespace | `buffer.renderer` → the renderer's exports |
-| **Schema/metadata** | Argument types, descriptions, docs | Auto-generated from the above |
-
-### How it works
-
-1. Each component builds an `ExportManifest` with a namespace (e.g., `"buffer"`), a description, and vectors of export declarations.
-2. Each export carries its handler (for commands/queries/properties), argument specs, return specs, and documentation.
-3. The component hands the manifest to the dispatcher via `register_exports()`.
-4. The dispatcher indexes handlers by fully-qualified name (`namespace.name`), auto-generates property getters/setters, and stores the manifest for introspection.
-5. Any consumer — another component, a plugin, the frontend over IPC, a debug tool — can dispatch by name or query the registry to discover what exists.
-
-### Properties
-
-Properties are a convenience that collapses a query+command pair into a single declaration. Declaring a property named `"title"` in the `"buffer"` namespace auto-registers:
-- `buffer.get_title` (query) — the getter
-- `buffer.set_title` (command) — the setter, only if `writable == true`
-
-This reduces boilerplate and keeps the intent clear: this is observable state, not an action.
-
-### Introspection
-
-The dispatcher automatically registers `registry.*` queries:
-
-- `registry.list` — returns all namespaces with their descriptions and export counts
-- `registry.describe` — given a namespace, returns full details: every command, query, event, property, and reference with their argument specs and documentation
-
-This makes the entire system self-documenting. A plugin can discover what commands exist. A debug CLI can list all available operations. Auto-generated documentation stays in sync with the code because the documentation *is* the code.
-
-### Why this design
-
-The typical approach is to define all commands in a central routing table and wire them to handlers. That creates a coupling bottleneck — every new capability requires edits in two places (the registry and the handler). With runtime exports, the component is the single source of truth. The registry is just an aggregation pass.
-
-This gives us:
-- **Locality** — each component owns its export declarations alongside its implementation
-- **Namespacing** — falls out naturally from component identity
-- **Typed** — argument/return types are declared in the manifest
-- **Introspectable** — any consumer can query what exists at runtime
-- **Language-agnostic** — the manifest is data, consumable from Lua, over IPC, or from a debug tool
-- **Composable** — plugins operate on the export surface without knowing implementation details
-
-## Process model
+## Process Model
 
 ```
-cef-backend (long-running daemon)
+dirtferret-core (C++ daemon)
   |
-  |--- CEF child processes (renderer, GPU, utility — managed by CEF, not us)
+  |--- CEF child processes (renderer, GPU, utility — managed by CEF internally)
   |
-  |=== Unix domain socket ===> cef-frontend (terminal client, one per terminal)
-  |=== Unix domain socket ===> cef-frontend (another terminal window)
-  |=== Unix domain socket ===> cef-frontend (reattached session)
+  |=== Cap'n Proto RPC (Unix socket) ===> dirtferret-tui (Rust, terminal 1)
+  |=== Cap'n Proto RPC (Unix socket) ===> dirtferret-tui (Rust, terminal 2)
+  |=== Cap'n Proto RPC (Unix socket) ===> external tool / remote plugin
 ```
 
-- Backend and frontend are **separate OS processes**. Non-negotiable.
-- The backend is a **multi-client server**. Multiple frontends can connect simultaneously. This enables detach/reattach (like tmux) and multiple terminal windows viewing the same browser session.
-- CEF itself forks child processes for its renderer, GPU, and utility processes. These are handled by `CefExecuteProcess()` at the very start of `main()` and are not part of our architecture.
+**dirtferret-core** is a long-running daemon. It owns all browser state: CEF browser instances (buffers), navigation history, cookies, extensions, the Lua plugin runtime. It runs CEF in offscreen rendering mode — no X11 windows, no GTK. It exposes a Cap'n Proto RPC server over a Unix domain socket.
 
-## IPC
+**dirtferret-tui** is a lightweight Rust terminal client built with [ratatui](https://ratatui.rs/). It connects to the core via Cap'n Proto RPC, renders pixels via the kitty graphics protocol, captures keyboard and mouse input, and manages terminal chrome (tab bar, status line, command bar). Multiple TUI instances can connect to the same core (shared session, like tmux).
 
-An abstract `Transport` interface (`src/ipc/transport.h`) decouples the mechanism from the rest of the code.
+**External tools** connect to the same RPC socket. A Python script, a Rust CLI, a Lua debugger — anything with a Cap'n Proto client library can query buffers, send commands, or subscribe to events. This is the equivalent of Neovim's `--listen` socket.
 
-Current implementation: Unix domain sockets with a binary wire protocol.
+### Startup Sequence
 
-Wire format:
-```
-[payload_len:u32][type:u8][id:u32][payload:bytes]
-```
+Following Neovim's `--embed` pattern:
 
-Message types: `COMMAND`, `QUERY`, `COMMAND_RESULT`, `QUERY_RESULT`, `FRAME`.
+1. Core starts, initializes CEF, binds the RPC socket
+2. Core waits for a UI to call `attachUi()` before sourcing user config
+3. TUI connects, sends `attachUi(width, height)` with a `Ui` callback capability
+4. Core sources `init.lua`, fires the `UiAttach` event, begins frame delivery
+5. TUI enters its render loop
 
-Commands and queries are serialized using a length-prefixed, little-endian binary format with tagged variant values (`src/ipc/serialization.cc`). FRAME messages carry raw pixel data in the payload with additional metadata (width, height, buffer_id).
+This ordering lets the UI handle early messages (errors during config loading, permission prompts) rather than losing them to a headless start.
 
-Runtime export manifests are serializable by design — the `registry.describe` query returns all metadata as a flat key-value map that travels over the same wire format. This means the frontend (or any IPC client) can introspect the backend's full command surface without special mechanisms.
+## API Design
 
-Future: shared memory transport for zero-copy frame delivery.
+The API is defined entirely in Cap'n Proto schema files under `schema/`. Cap'n Proto's RPC system provides:
 
-## Terminology
+- **Typed interfaces** — methods with named, typed parameters and return values
+- **Promise pipelining** — chain calls without waiting for round trips
+- **Bidirectional RPC** — both sides can call each other (core calls UI callbacks)
+- **Built-in introspection** — schema metadata is embeddable and queryable
 
-| Term | Meaning |
-|---|---|
-| **Buffer** | One CEF browser instance plus its metadata. Equivalent to a vim buffer. |
-| **Runtime export** | A capability that a component deliberately exposes to the system: a command, query, event, property, or reference. |
-| **Export manifest** | The structured declaration of all runtime exports for one component. Carries namespace, descriptions, handlers, and argument specs. |
-| **Namespace** | The component identity prefix for export names. E.g., `buffer`, `frontend`, `plugin`. |
-| **Command** | A fire-and-forget action that may modify state. Has a name and optional args. |
-| **Query** | A read-only request that returns data without side effects. |
-| **Event** | A notification emitted by a component. Other components or plugins can subscribe. |
-| **Property** | Observable state owned by a component. Auto-generates getter/setter query/command pairs. |
-| **Reference** | A declared relationship between export namespaces. |
-| **Policy** | Logic that could be user preference. Lives in the plugin layer. |
-| **Mechanics** | Internal coordination logic. Lives in the API layer. |
-| **Introspection** | The ability to query the system at runtime for what exports exist, their types, args, and documentation. |
+### Core Interface
 
-## File organization
+The core exposes a `Core` RPC interface. This is the browser kernel's API, analogous to Neovim's `nvim_*` functions.
 
-```
-src/
-  backend_main.cc           Backend entry point
-  frontend_main.cc          Frontend entry point
-  backend/                  CEF engine (app, client, renderer, engine)
-  api/                      Dispatcher, export types, command/query definitions
-  ipc/                      Transport abstraction + Unix socket + serialization
-  plugin/                   Plugin host abstraction + Lua runtime
-  frontend/                 Kitty renderer, terminal management, input, layout
-  tests/                    Google Test files
-  exercises/                Standalone learning exercises
+```capnp
+interface Core {
+  createBuffer  @0 (url :Text) -> (bufferId :Int32);
+  closeBuffer   @1 (bufferId :Int32) -> ();
+  listBuffers   @2 () -> (buffers :List(BufferInfo));
+  getBufferInfo @3 (bufferId :Int32) -> (info :BufferInfo);
+  navigate      @4 (bufferId :Int32, url :Text) -> ();
+  goBack        @5 (bufferId :Int32) -> ();
+  goForward     @6 (bufferId :Int32) -> ();
+  reload        @7 (bufferId :Int32) -> ();
+  stopLoad      @8 (bufferId :Int32) -> ();
+  # ... input, zoom, find, JS execution, UI attachment
+  attachUi     @20 (ui :Ui, width :UInt32, height :UInt32) -> ();
+}
 ```
 
-Rule: one header + implementation pair per major component. CEF headers are only allowed in `src/backend/`.
+### UI Callback Interface
 
-## Design decisions and rationale
+When a TUI calls `attachUi()`, it passes a `Ui` capability — an RPC interface that the core calls back into. This is analogous to Neovim's `redraw` notification stream.
 
-**Why separate processes for backend and frontend?**
-Decoupling rendering from display allows detach/reattach, multiple views, and crash isolation. The frontend is lightweight — if it crashes, the backend and all browser state survive.
+```capnp
+interface Ui {
+  onFrame               @0 (bufferId :Int32, shmName :Text,
+                            width :UInt32, height :UInt32,
+                            format :PixelFormat,
+                            dirtyRects :List(Rect)) -> ();
+  onTitleChanged        @3 (bufferId :Int32, title :Text) -> ();
+  onUrlChanged          @4 (bufferId :Int32, url :Text) -> ();
+  onLoadingStateChanged @5 (bufferId :Int32, loading :Bool,
+                            canGoBack :Bool, canGoForward :Bool) -> ();
+  onFocusedFieldChanged @7 (bufferId :Int32, editable :Bool) -> ();
+  # ... more state update callbacks
+}
+```
 
-**Why runtime exports instead of a central command registry?**
-Locality. Each component is the single source of truth for what it offers. No two-place edits, no central bottleneck. The dispatcher aggregates — it doesn't define. This also makes the system self-documenting: the export declarations carry their own argument specs and descriptions, so introspection and documentation are always in sync with the code.
+The `onFocusedFieldChanged` callback is critical for modal input: when `editable` becomes true, the TUI can auto-switch to insert mode (passing keystrokes to CEF); when false, it can return to normal mode (keystrokes handled locally).
 
-**Why a command/query dispatcher instead of direct function calls?**
-Extensibility. Plugins need to intercept, wrap, and register handlers without modifying core code. Typed command/query objects are composable and serializable. The dispatcher is the single point where policy and mechanics meet.
+## Frame Delivery Pipeline
 
-**Why Lua for plugins?**
-Lightweight, embeddable, well-understood. nvim proved the model works for this kind of application. Lua's simplicity is a feature — it keeps plugins focused on policy rather than reimplementing the browser.
+This is the critical data path. Pixel data flows from CEF to the terminal without serialization.
 
-**Why offscreen rendering?**
-We don't want X11/GTK windows. The terminal is our display. CEF's OSR mode gives us raw pixel buffers that we can send anywhere — in our case, encoded as kitty graphics protocol escape sequences.
+```
+CEF OnPaint(buffer, width, height, dirtyRects)
+  |
+  v
+Core: memcpy into shared memory segment (/dev/shm/dirtferret-frame-N)
+  |
+  v
+Core: RPC call to Ui.onFrame(shmName, width, height, dirtyRects)
+  |                                    (metadata only, no pixels in the message)
+  v
+TUI: mmap shared memory, read pixel data
+  |
+  v
+TUI: BGRA -> RGBA conversion (swap B and R channels)
+  |
+  v
+TUI: write kitty graphics escape sequence
+     ESC _Ga=T,f=32,s=W,v=H,t=s;/dev/shm/dirtferret-frame-N ESC \
+  |
+  v
+Terminal (kitty/WezTerm/Ghostty): renders pixels
+```
 
-**Why kitty graphics protocol specifically?**
-It's the most capable terminal graphics protocol available: supports direct pixel data, image placement, and animation. Supported by kitty, WezTerm, Ghostty, and others. Sixel is an alternative but has lower resolution and fewer features.
+**Key details:**
+
+- CEF's `OnPaint` delivers BGRA pixel data with a list of dirty rectangles
+- The core writes pixels into a POSIX shared memory segment (`shm_open` / `memfd_create`)
+- Only metadata travels through Cap'n Proto RPC — the pixels stay in shared memory
+- The kitty graphics protocol supports shared memory mode (`t=s`), allowing the terminal to read directly from the same shm segment — true zero-copy from CEF to display
+- Double-buffering: two shm segments alternate so the core can write the next frame while the TUI reads the current one
+- Dirty rectangle tracking: only changed regions need BGRA-to-RGBA conversion and kitty protocol update
+
+**Frame rate:** CEF's `windowless_frame_rate` setting controls how often `OnPaint` fires (1-60 fps, default 30). The core can also use `SendExternalBeginFrame()` for client-driven frame timing.
+
+**Inactive buffers:** `CefBrowserHost::WasHidden(true)` stops `OnPaint` for hidden buffers (tabs not currently displayed), saving GPU and bandwidth.
+
+## Buffer / Window / Tab Model
+
+Following Neovim's triad:
+
+| Concept | Neovim | dirtferret | Implementation |
+|---------|--------|------------|----------------|
+| **Buffer** | File contents + metadata | One CEF browser instance + metadata | `CefBrowser` with integer ID from `GetIdentifier()` |
+| **Window** | Viewport into a buffer | Viewport region in the terminal | ratatui `Rect` with kitty graphics placement |
+| **Tab page** | Collection of windows | A saved window arrangement | TUI-side layout state |
+
+- A buffer can exist without being displayed (background tab)
+- Multiple windows can show the same buffer (split view)
+- Switching tab pages changes the entire window layout
+- Buffer IDs are CEF's `CefBrowser::GetIdentifier()` — also used as Chrome extension `tabId`
+
+## Scripting
+
+### Lua Runtime
+
+The core embeds LuaJIT as its primary scripting engine, following Neovim's model. Lua plugins have direct, zero-overhead access to the core API — no RPC serialization.
+
+**Binding generation:** A build-time code generator reads the `.capnp` schema and produces Lua-to-C++ bridge functions. The result is a `dirtferret` table in Lua:
+
+```lua
+local buf = dirtferret.buffer.create({ url = "https://example.com" })
+local info = dirtferret.buffer.get_info(buf)
+print(info.title)
+
+dirtferret.buffer.navigate(buf, "https://github.com")
+
+dirtferret.on("TitleChanged", function(event)
+    print("Title is now: " .. event.title)
+end)
+
+dirtferret.keymap.set("n", "gd", function()
+    dirtferret.buffer.navigate(dirtferret.buffer.active(), "https://duckduckgo.com")
+end)
+```
+
+This is analogous to `vim.api.*` in Neovim. The Lua functions call directly into C++ — same thread, no serialization. The `.capnp` schema ensures the Lua API surface matches what external RPC clients see.
+
+### External Plugins (RPC)
+
+Any language with a Cap'n Proto library can connect to the core's RPC socket and act as a plugin:
+
+```python
+import capnp
+core = capnp.load("schema/core.capnp")
+client = core.Core.connect("unix:/tmp/dirtferret.sock")
+
+buffers = client.listBuffers().wait()
+for buf in buffers.buffers:
+    print(f"{buf.id}: {buf.title} — {buf.url}")
+```
+
+## Extension Support
+
+Chrome extension compatibility is a long-term goal, not a launch requirement.
+
+### Launch Target: Native Equivalents
+
+The most-requested extension functionality is implemented natively:
+
+- **Ad/tracker blocking:** `CefResourceRequestHandler` intercepts network requests. Lua plugins provide filter lists and rules (equivalent to `declarativeNetRequest`).
+- **Content injection:** `ExecuteJavaScript` injects user scripts into pages (equivalent to content scripts). Lua plugins manage injection rules.
+- **Custom CSS:** Dark mode, readability — injected via JavaScript.
+
+This covers the majority of real-world extension use: ad blockers, dark mode, user scripts, privacy tools.
+
+### Future: Chrome Extension Loading
+
+When CEF adds programmatic extension management APIs ([#3450](https://github.com/chromiumembedded/cef/issues/3450)), extensions can be loaded from a profile directory and their state exposed through the RPC API.
+
+### Architectural Hooks
+
+Even before extensions are functional, the architecture includes hooks for future support:
+
+- **Buffer IDs = `CefBrowser::GetIdentifier()`** — already matches what extensions expect for `chrome.tabs` `tabId`
+- **`CefRequestContext`** — per-context extension isolation is built into CEF
+- **`CefRequestHandler` / `CefResourceRequestHandler`** — provides the same request interception that `chrome.webRequest` uses
+
+## Technology Stack
+
+| Component | Technology | Role |
+|-----------|-----------|------|
+| **Browser engine** | CEF 142 (Chromium 142) | Page rendering, JavaScript, networking |
+| **Core language** | C++17 | CEF integration, Lua hosting, RPC server |
+| **Frontend language** | Rust | Terminal UI, input handling, kitty graphics |
+| **Terminal UI** | ratatui + crossterm | Layout, widgets, event loop |
+| **RPC** | Cap'n Proto | API definition, cross-language communication |
+| **Scripting** | LuaJIT | User configuration, plugins, policy logic |
+| **Graphics** | Kitty graphics protocol | Pixel display in terminal |
+| **Build** | CMake + Cargo + Nix | Compilation, codegen, environment |
+
+## Directory Structure
+
+```
+schema/              Cap'n Proto schemas (source of truth for API)
+  types.capnp        Shared types (BufferInfo, KeyEvent, Rect, enums)
+  core.capnp         Core + Ui interfaces
+
+core/                C++ backend (browser kernel)
+  main.cc            Entry point
+  engine/            CEF integration (app, client, renderer, engine)
+  shm/               Shared memory frame pool
+  CMakeLists.txt
+
+tui/                 Rust terminal client
+  src/               App state, modal input, viewport, ratatui widgets
+  Cargo.toml
+  build.rs           Cap'n Proto codegen
+
+tests/core/          C++ tests (Google Test)
+nix/                 Nix packaging
+exercises/           Standalone learning exercises
+```
+
+## Design Decisions
+
+**Why Neovim's model?** Neovim proved that a headless core with RPC-attached UIs produces an exceptionally extensible system. The same model applies to a browser.
+
+**Why Cap'n Proto?** Typed schemas, zero-copy serialization, promise pipelining, bidirectional RPC, and code generation for C++ and Rust. The schema IS the API documentation.
+
+**Why Rust for the frontend?** Memory safety, async I/O (tokio), ratatui for TUI, Cap'n Proto support. No CEF dependency.
+
+**Why shared memory for frames?** 1920x1080 at 32bpp is ~8MB per frame, ~240MB/s at 30fps. Shared memory avoids serializing pixels through RPC.
+
+**Why LuaJIT?** Proven by Neovim for exactly this use case. Fast, embeddable, works with CEF's `-fno-exceptions` build.
+
+**Why kitty graphics?** Most capable terminal graphics protocol: raw pixels, RGBA, shared memory mode, image replacement. Supported by kitty, WezTerm, Ghostty.

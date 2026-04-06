@@ -1,0 +1,37 @@
+[package]
+name = "dirtferret-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal frontend for dirtferret browser"
+
+[dependencies]
+# Terminal UI
+ratatui = { version = "0.29", features = ["crossterm"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+
+# Cap'n Proto
+capnp = "0.20"
+capnp-rpc = "0.20"
+
+# Error handling
+anyhow = "1"
+
+# Shared memory reading
+nix = { version = "0.29", features = ["mman", "fs"] }
+
+# Pixel conversion
+bytemuck = "1"
+
+[build-dependencies]
+capnpc = "0.20"
+
+[dev-dependencies]
+# Testing utilities
+
+[[bin]]
+name = "dirtferret-tui"
+path = "src/main.rs"

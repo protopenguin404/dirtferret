@@ -1,156 +1,118 @@
 {
-  description = "CEF terminal browser — build environment";
+  description = "dirtferret — terminal web browser on CEF";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
   };
 
   outputs = {
-    self,
     nixpkgs,
-  } @ inputs: let
+    self,
+  }: let
     system = "x86_64-linux";
     pkgs = import nixpkgs {
       inherit system;
-      config.allowUnfree = true;
+    };
+    cef = pkgs.callPackage ./nix/cef-binary.nix {};
+  in {
+    packages.${system} = {
+      default = cef;
+      cef-binary = cef;
     };
 
-    # Chromium/CEF build dependencies (from install-build-deps.py).
-    chromiumDeps = with pkgs; [
-      # ── Core build tooling ──
-      cmake
-      ninja
-      pkg-config
-      autoconf
-      binutils
-      bison
-      flex
-      gperf
-      patch
-      perl
-      python3
-      ruby
-      git
+    devShells.${system}.default = pkgs.mkShell {
+      nativeBuildInputs = with pkgs; [
+        # Build tools
+        cmake
+        ninja
+        gcc
+        pkg-config
 
-      # ── Compression / archiving ──
-      bzip2
-      p7zip
-      xz
-      zip
-      zstd
-      zlib
+        # Cap'n Proto compiler + libraries
+        capnproto
 
-      # ── System / IPC libs ──
-      dbus
-      elfutils
-      fakeroot
-      libcap
-      libffi
-      linux-pam
-      lksctp-tools
-      openssl
-      sqlite
-      systemd
-      util-linux
+        # Rust toolchain
+        rustc
+        cargo
+        rustfmt
+        clippy
 
-      # ── Graphics / display ──
-      cairo
-      fontconfig
-      freetype
-      libdrm
-      libglvnd
-      libGLU
-      libpng
-      libjpeg
-      libva
-      mesa
-      pango
-      pixman
-      vulkan-loader
-      wayland
-      gtk3
+        # Testing
+        gtest
+      ];
 
-      # ── X11 / Xorg ──
-      libx11
-      libxcb
-      libxcomposite
-      libxdamage
-      libxext
-      libxfixes
-      libxrandr
-      libxkbcommon
-      libxshmfence
-      libxscrnsaver
-      libxt
-      libxtst
-      libxau
-      libxcursor
-      libxdmcp
-      libxi
-      libxinerama
-      libxrender
-      xcb-util-cursor
-      xorg-server
+      buildInputs = with pkgs; [
+        # CEF runtime dependencies
+        libx11
+        libxcomposite
+        libxdamage
+        libxext
+        libxfixes
+        libxrandr
+        libxcb
+        libxshmfence
+        nss
+        nspr
+        at-spi2-core
+        cups
+        libxkbcommon
+        mesa
+        libglvnd
+        glib
+        dbus
+        expat
+        cairo
+        pango
+        alsa-lib
+        gtk3
+        libdrm
+        libgbm
+        udev
+        systemdLibs
 
-      # ── Input / accessibility / misc device ──
-      at-spi2-core
-      bluez
-      brltty
-      libevdev
-      libinput
-      ncurses
-      speechd
+        # LuaJIT
+        luajit
 
-      # ── Audio / network / crypto ──
-      alsa-lib
-      cups
-      curl
-      glib
-      krb5
-      nss
-      nspr
-      pciutils
-      pulseaudio
+        # Cap'n Proto runtime
+        capnproto
+      ];
 
-      # ── Misc CLI tools (used by chromium build scripts) ──
-      fd
-      file
-      fuse
-      libxslt
-      lsb-release
-      procps
-      ripgrep
-      wdiff
-      expat
-    ];
+      shellHook = ''
+        export CEF_ROOT="${cef}"
 
-    # Our project's own dependencies (on top of Chromium's).
-    projectDeps = with pkgs; [
-      lua5_4
-      gtest
+        build-core() {
+          mkdir -p build && cd build
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCEF_ROOT="$CEF_ROOT" \
+            ..
+          ninja "$@"
+          cd ..
+        }
 
-    ];
-  in {
-    devShells.${system}.default =
-      # buildFHSEnv creates a bubblewrap sandbox with standard FHS layout
-      # (/lib64/ld-linux-x86-64.so.2, /usr/lib, etc). Required on NixOS
-      # because depot_tools downloads prebuilt binaries (cipd, gn, clang,
-      # reclient) that are dynamically linked against FHS paths.
-      #
-      # On non-NixOS distros this is unnecessary — deps come from the
-      # system package manager and sync.sh / build.sh run directly.
-      (pkgs.buildFHSEnv {
-        name = "cef-env";
+        build-tui() {
+          cd tui && cargo build "$@" && cd ..
+        }
 
-        targetPkgs = pkgs: chromiumDeps ++ projectDeps;
+        build-all() {
+          build-core && build-tui
+        }
 
-        profile = ''
-          export PATH="$PWD/depot_tools:$PATH"
-          export CEF_BUILD_ROOT="$PWD"
-        '';
+        run-tests() {
+          build-core test-schema test-shm test-input
+          cd build && ctest --output-on-failure && cd ..
+          cd tui && cargo test && cd ..
+        }
 
-        runScript = "bash";
-      })
-      .env;
+        echo "dirtferret dev environment"
+        echo "  CEF_ROOT=$CEF_ROOT"
+        echo ""
+        echo "Commands:"
+        echo "  build-core [target]  — build C++ core (default: all)"
+        echo "  build-tui [flags]    — build Rust TUI"
+        echo "  build-all            — build everything"
+        echo "  run-tests            — run all tests"
+      '';
+    };
   };
 }

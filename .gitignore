@@ -1,10 +1,15 @@
-# Build output (legacy, from before workspace approach)
+# Build output
 build/
 
-# Assembled workspace (immutable CEF + mutable sources, recreated by shellHook)
-workspace/
+# Rust
+tui/target/
 
-# CEF binary distribution files (should not be in repo root — come from nix store)
+# Nix
+result
+result-*
+
+# CEF binary distribution (comes from nix store)
+# These may appear if someone unpacks CEF manually
 Release/
 Resources/
 include/
@@ -20,6 +25,19 @@ README.txt
 .bazelrc
 .bazelversion
 
-# Nix result symlinks
-result
-result-*
+# Old workspace directory
+workspace/
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
+# Cap'n Proto generated files (in build dir, not tracked)
+*.capnp.h
+*.capnp.c++
