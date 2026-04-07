@@ -32,6 +32,9 @@ public:
   // If initialize() returned false, the exit code for a child process.
   int child_exit_code() const;
 
+  // Get the frame pool initialized.
+  bool setup_frame_pool(uint32_t width, uint32_t height);
+
   // Run one iteration of CEF's message loop.
   void do_message_loop_work();
 
@@ -42,7 +45,6 @@ public:
   // NOTE: These must be called from the CEF UI thread (TID_UI).
   // The RPC server is responsible for posting to TID_UI.
 
-  struct BufOptions {};
   int32_t create_buffer(int stub); // Stub
   void navigate(int32_t buffer_id, const std::string &url);
   void go_back(int32_t buffer_id);
@@ -53,6 +55,8 @@ public:
   // --- Queries ---
   std::string get_title(int32_t buffer_id);
   std::string get_url(int32_t buffer_id);
+  std::string frame_shm_name() const;
+
   // BufferInfo get_buffer_info(int32_t buffer_id);
 
   // --- Input injection ---

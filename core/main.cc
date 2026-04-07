@@ -12,9 +12,41 @@
 class CoreImpl final : public Core::Server {
 private:
   Engine &engine_;
+  kj::Maybe<Ui::Client> ui_;
 
 public:
   CoreImpl(Engine &engine) : engine_(engine) {}
+
+  kj::Promise<void> attachUi(AttachUiContext context) override {
+    auto params = context.getParams();
+    ui_ = params.getUi();
+    uint32_t w = params.getWidth();
+    uint32_t h = params.getHeight();
+
+    std::cerr << "[rpc] UI attached (" << w << "x" << h << ")" << std::endl;
+
+    engine_.setup_frame_pool(w, h);
+    engine_.resize(0, w, h);
+
+    // Frame callback, notify the frontend
+    engine_.set_frame_callback([this](int32_t id, const void *, int w, int h) {
+      KJ_IF_MAYBE (ui, ui_) {
+        auto req = ui->onFrameRequest();
+        req.setBufferId(id);
+        req.setShmName(engine_.frame_shm_name());
+        req.setWidth(w);
+        req.setHeight(h);
+        req.setFormat(::PixelFormat::BGRA);
+        // Fire and forget — don't block OnPaint waiting for TUI
+        req.send().detach([](kj::Exception &&e) {
+          std::cerr << "[rpc] onFrame error: " << e.getDescription().cStr()
+                    << std::endl;
+        });
+      }
+    });
+
+    return ::kj::READY_NOW;
+  }
 
   kj::Promise<void> createBuffer(CreateBufferContext context) override {
     std::cerr << "[rpc] createBuffer (stub)" << std::endl;
@@ -67,8 +99,8 @@ kj::Promise<void> readStdin(Engine &engine, kj::AsyncInputStream &input,
   auto buf = kj::heapArray<char>(1);
   auto ptr = buf.begin();
   return input.tryRead(ptr, 1, 1).then(
-      [&engine, &input, &lineBuf, buf = kj::mv(buf)](size_t n) mutable
-          -> kj::Promise<void> {
+      [&engine, &input, &lineBuf,
+       buf = kj::mv(buf)](size_t n) mutable -> kj::Promise<void> {
         if (n == 0)
           return kj::READY_NOW; // EOF
 

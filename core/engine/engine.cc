@@ -1,6 +1,7 @@
 #include "engine/engine.h"
 #include "engine/app.h"
 #include "include/cef_app.h"
+#include "shm/frame_pool.h"
 
 #include <iostream>
 
@@ -9,6 +10,7 @@ struct Engine::Impl {
   bool initialized = false;
   int child_exit_code = -1;
   FrameCallback frame_callback;
+  std::unique_ptr<FramePool> frame_pool;
 };
 
 Engine::Engine() : impl_(std::make_unique<Impl>()) {}
@@ -38,6 +40,41 @@ bool Engine::initialize(int argc, char *argv[]) {
 
   std::cerr << "[engine] CEF initialized." << std::endl;
   impl_->initialized = true;
+  return true;
+}
+
+bool Engine::setup_frame_pool(uint32_t width, uint32_t height) {
+
+  // Setup the frame pool
+  impl_->frame_pool = std::make_unique<FramePool>("dirtferret", width, height);
+  if (!impl_->frame_pool->create()) {
+    std::cerr << "[engine] Failed to create frame pool" << std ::endl;
+    return false;
+  }
+  std::cerr << "[engine] Frame pool created: " << width << "x" << height
+            << std::endl;
+
+  // Configure the frame callback
+  auto client = impl_->app->client();
+  if (client && client->render_handler()) {
+    client->render_handler()->set_paint_callback(
+        [this](const void *buf, int w, int h,
+               const CefRenderHandler::RectList &) {
+          auto &pool = impl_->frame_pool;
+          if (!pool)
+            return;
+          if ((uint32_t)w != pool->width() || (uint32_t)h != pool->height()) {
+            pool->resize(w, h);
+          }
+
+          memcpy(pool->write_buffer(), buf, pool->buffer_size());
+          pool->swap();
+
+          if (impl_->frame_callback) {
+            impl_->frame_callback(0, pool->read_buffer(), w, h);
+          }
+        });
+  }
   return true;
 }
 
@@ -99,6 +136,12 @@ std::string Engine::get_title(int32_t buffer_id) {
 std::string Engine::get_url(int32_t buffer_id) {
   auto client = impl_->app->client();
   return client ? client->url() : "";
+}
+
+std::string Engine::frame_shm_name() const {
+  if (impl_->frame_pool)
+    return impl_->frame_pool->read_shm_name();
+  return "";
 }
 
 void Engine::resize(int32_t buffer_id, int width, int height) {
