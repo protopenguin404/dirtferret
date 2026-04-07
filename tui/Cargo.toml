@@ -21,7 +21,7 @@ capnp-rpc = "0.20"
 anyhow = "1"
 
 # Shared memory reading
-nix = { version = "0.29", features = ["mman", "fs"] }
+libc = {version = "0.2"}
 
 # Pixel conversion
 bytemuck = "1"
