@@ -13,6 +13,8 @@ class CoreImpl final : public Core::Server {
 private:
   Engine &engine_;
   kj::Maybe<Ui::Client> ui_;
+  uint32_t viewport_width_ = 800;
+  uint32_t viewport_height_ = 600;
 
 public:
   CoreImpl(Engine &engine) : engine_(engine) {}
@@ -20,36 +22,113 @@ public:
   kj::Promise<void> attachUi(AttachUiContext context) override {
     auto params = context.getParams();
     ui_ = params.getUi();
-    uint32_t w = params.getWidth();
-    uint32_t h = params.getHeight();
+    viewport_width_ = params.getWidth();
+    viewport_height_ = params.getHeight();
 
-    std::cerr << "[rpc] UI attached (" << w << "x" << h << ")" << std::endl;
+    std::cerr << "[rpc] UI attached (" << viewport_width_ << "x"
+              << viewport_height_ << ")" << std::endl;
 
-    engine_.setup_frame_pool(w, h);
-    engine_.resize(0, w, h);
-
-    // Frame callback, notify the frontend
-    engine_.set_frame_callback([this](int32_t id, const void *, int w, int h) {
-      KJ_IF_MAYBE (ui, ui_) {
-        auto req = ui->onFrameRequest();
-        req.setBufferId(id);
-        req.setShmName(engine_.frame_shm_name());
-        req.setWidth(w);
-        req.setHeight(h);
-        req.setFormat(::PixelFormat::BGRA);
-        // Fire and forget — don't block OnPaint waiting for TUI
-        req.send().detach([](kj::Exception &&e) {
-          std::cerr << "[rpc] onFrame error: " << e.getDescription().cStr()
-                    << std::endl;
+    // Frame callback: notify TUI when a buffer paints
+    engine_.set_frame_callback(
+        [this](int32_t id, const void *, int w, int h) {
+          KJ_IF_MAYBE(ui, ui_) {
+            auto req = ui->onFrameRequest();
+            req.setBufferId(id);
+            req.setShmName(engine_.frame_shm_name(id));
+            req.setWidth(w);
+            req.setHeight(h);
+            req.setFormat(::PixelFormat::BGRA);
+            req.send().detach([](kj::Exception &&e) {
+              std::cerr << "[rpc] onFrame error: " << e.getDescription().cStr()
+                        << std::endl;
+            });
+          }
         });
+
+    // State change callback: push title/url/loading updates to TUI
+    engine_.set_state_callback([this](int32_t buffer_id) {
+      KJ_IF_MAYBE(ui, ui_) {
+        // Title
+        {
+          auto req = ui->onTitleChangedRequest();
+          req.setBufferId(buffer_id);
+          req.setTitle(engine_.get_title(buffer_id));
+          req.send().detach([](kj::Exception &&) {});
+        }
+        // URL
+        {
+          auto req = ui->onUrlChangedRequest();
+          req.setBufferId(buffer_id);
+          req.setUrl(engine_.get_url(buffer_id));
+          req.send().detach([](kj::Exception &&) {});
+        }
+        // Loading state
+        {
+          auto req = ui->onLoadingStateChangedRequest();
+          req.setBufferId(buffer_id);
+          req.setLoading(engine_.is_loading(buffer_id));
+          req.setCanGoBack(engine_.can_go_back(buffer_id));
+          req.setCanGoForward(engine_.can_go_forward(buffer_id));
+          req.send().detach([](kj::Exception &&) {});
+        }
+        // Progress
+        {
+          auto req = ui->onLoadProgressRequest();
+          req.setBufferId(buffer_id);
+          req.setProgress(engine_.load_progress(buffer_id));
+          req.send().detach([](kj::Exception &&) {});
+        }
       }
     });
 
-    return ::kj::READY_NOW;
+    // Create the initial buffer
+    engine_.create_buffer("about:blank", viewport_width_, viewport_height_);
+
+    return kj::READY_NOW;
   }
 
   kj::Promise<void> createBuffer(CreateBufferContext context) override {
-    std::cerr << "[rpc] createBuffer (stub)" << std::endl;
+    auto url = context.getParams().getUrl();
+    std::cerr << "[rpc] createBuffer(" << url.cStr() << ")" << std::endl;
+    auto id = engine_.create_buffer(url, viewport_width_, viewport_height_);
+    context.getResults().setBufferId(id);
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> closeBuffer(CloseBufferContext context) override {
+    auto id = context.getParams().getBufferId();
+    std::cerr << "[rpc] closeBuffer(" << id << ")" << std::endl;
+    engine_.close_buffer(id);
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> listBuffers(ListBuffersContext context) override {
+    auto ids = engine_.list_buffer_ids();
+    auto results = context.getResults();
+    auto list = results.initBuffers(ids.size());
+    for (size_t i = 0; i < ids.size(); ++i) {
+      auto id = ids[i];
+      list[i].setId(id);
+      list[i].setUrl(engine_.get_url(id));
+      list[i].setTitle(engine_.get_title(id));
+      list[i].setLoading(engine_.is_loading(id));
+      list[i].setCanGoBack(engine_.can_go_back(id));
+      list[i].setCanGoForward(engine_.can_go_forward(id));
+      list[i].setLoadProgress(engine_.load_progress(id));
+    }
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> getBufferInfo(GetBufferInfoContext context) override {
+    auto id = context.getParams().getBufferId();
+    auto info = context.getResults().getInfo();
+    info.setId(id);
+    info.setUrl(engine_.get_url(id));
+    info.setTitle(engine_.get_title(id));
+    info.setLoading(engine_.is_loading(id));
+    info.setCanGoBack(engine_.can_go_back(id));
+    info.setCanGoForward(engine_.can_go_forward(id));
+    info.setLoadProgress(engine_.load_progress(id));
     return kj::READY_NOW;
   }
 
@@ -81,9 +160,29 @@ public:
     engine_.stop_load(context.getParams().getBufferId());
     return kj::READY_NOW;
   }
+
+  kj::Promise<void> setActiveBuffer(SetActiveBufferContext context) override {
+    auto id = context.getParams().getBufferId();
+    engine_.set_active_buffer(id);
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> getActiveBuffer(GetActiveBufferContext context) override {
+    context.getResults().setBufferId(engine_.active_buffer_id());
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> resize(ResizeContext context) override {
+    auto params = context.getParams();
+    auto id = params.getBufferId();
+    viewport_width_ = params.getWidth();
+    viewport_height_ = params.getHeight();
+    engine_.resize(id, viewport_width_, viewport_height_);
+    return kj::READY_NOW;
+  }
 };
 
-// --- CEF pump: drive CEF's message loop from KJ ---
+// --- CEF pump ---
 
 kj::Promise<void> pumpCef(Engine &engine, kj::Timer &timer) {
   engine.do_message_loop_work();
@@ -92,7 +191,7 @@ kj::Promise<void> pumpCef(Engine &engine, kj::Timer &timer) {
   });
 }
 
-// --- Stdin command reader: type URLs to navigate ---
+// --- Stdin command reader ---
 
 kj::Promise<void> readStdin(Engine &engine, kj::AsyncInputStream &input,
                             kj::Vector<char> &lineBuf) {
@@ -102,7 +201,7 @@ kj::Promise<void> readStdin(Engine &engine, kj::AsyncInputStream &input,
       [&engine, &input, &lineBuf,
        buf = kj::mv(buf)](size_t n) mutable -> kj::Promise<void> {
         if (n == 0)
-          return kj::READY_NOW; // EOF
+          return kj::READY_NOW;
 
         char c = buf[0];
         if (c == '\n') {
@@ -112,22 +211,28 @@ kj::Promise<void> readStdin(Engine &engine, kj::AsyncInputStream &input,
 
           if (line == "q" || line == "quit") {
             std::cerr << "[core] Quit." << std::endl;
-            return kj::READY_NOW; // breaks the loop
+            return kj::READY_NOW;
+          }
+
+          auto active = engine.active_buffer_id();
+          if (active < 0) {
+            std::cerr << "[core] No active buffer." << std::endl;
           } else if (line == "b" || line == "back") {
-            engine.go_back(0);
+            engine.go_back(active);
           } else if (line == "f" || line == "forward") {
-            engine.go_forward(0);
+            engine.go_forward(active);
           } else if (line == "r" || line == "reload") {
-            engine.reload(0);
+            engine.reload(active);
           } else if (line == "t" || line == "title") {
-            std::cerr << "[info] " << engine.get_title(0) << std::endl;
+            std::cerr << "[info] " << engine.get_title(active) << std::endl;
           } else if (line == "u" || line == "url") {
-            std::cerr << "[info] " << engine.get_url(0) << std::endl;
+            std::cerr << "[info] " << engine.get_url(active) << std::endl;
+          } else if (line == "new") {
+            engine.create_buffer("about:blank", 800, 600);
           } else if (!line.empty()) {
-            // Treat as URL
             if (line.find("://") == std::string::npos)
               line = "https://" + line;
-            engine.navigate(0, line);
+            engine.navigate(active, line);
           }
 
           return readStdin(engine, input, lineBuf);
@@ -139,8 +244,6 @@ kj::Promise<void> readStdin(Engine &engine, kj::AsyncInputStream &input,
 }
 
 int main(int argc, char *argv[]) {
-  // CEF MUST initialize first — child processes re-exec this binary
-  // and need to exit before any other framework touches state.
   Engine engine;
   if (!engine.initialize(argc, argv)) {
     int code = engine.child_exit_code();
@@ -154,7 +257,6 @@ int main(int argc, char *argv[]) {
 
   auto io = kj::setupAsyncIo();
 
-  // RPC server on TCP 5000
   capnp::TwoPartyServer server(kj::heap<CoreImpl>(engine));
   auto address = io.provider->getNetwork()
                      .parseAddress("127.0.0.1", 5000)
@@ -163,23 +265,17 @@ int main(int argc, char *argv[]) {
   auto listenPromise = server.listen(*listener);
   std::cerr << "[rpc] Listening on 127.0.0.1:5000" << std::endl;
 
-  // CEF message pump (~60fps)
   auto cefPump = pumpCef(engine, io.provider->getTimer());
 
-  // Stdin command loop
   auto stdinPipe = io.lowLevelProvider->wrapInputFd(0);
   kj::Vector<char> lineBuf;
 
   std::cerr << "\n--- dirtferret prototype ---" << std::endl;
-  std::cerr << "Type a URL to navigate, or:" << std::endl;
-  std::cerr << "  b/back, f/forward, r/reload" << std::endl;
-  std::cerr << "  t/title, u/url" << std::endl;
-  std::cerr << "  q/quit" << std::endl;
+  std::cerr << "Type a URL, or: b/back, f/forward, r/reload, new, q/quit"
+            << std::endl;
   std::cerr << "---\n" << std::endl;
 
   auto stdinLoop = readStdin(engine, *stdinPipe, lineBuf);
-
-  // Run until stdin exits (quit command or EOF)
   stdinLoop.wait(io.waitScope);
 
   engine.shutdown();
