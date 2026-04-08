@@ -7,45 +7,31 @@
 #include <vector>
 
 // Callback for frame data from OnPaint.
-// (buffer_id, pixel_data, width, height, dirty_rects)
 using FrameCallback = std::function<void(int32_t buffer_id, const void *pixels,
                                          int width, int height)>;
 
-// The Engine is the core's interface to CEF.
-// It manages buffer (browser) lifecycles and provides methods
-// for navigation, state queries, and input injection.
-//
-// The RPC server calls these methods. The Engine posts CEF work
-// to TID_UI as needed. This class is NOT CefBase-derived.
-//
-// CEF headers are confined to engine.cc — consumers of this header
-// (e.g. RPC server, main.cc) do not need -fno-exceptions.
+// Callback for buffer state changes.
+using StateCallback = std::function<void(int32_t buffer_id)>;
+
+class LuaRuntime; // forward declaration
+
 class Engine {
 public:
   Engine();
   ~Engine();
 
-  // Initialize CEF. Returns false if this is a child process
-  // (caller should exit with child_exit_code()) or if init fails.
   bool initialize(int argc, char *argv[]);
-
-  // If initialize() returned false, the exit code for a child process.
   int child_exit_code() const;
-
-  // Get the frame pool initialized.
-  bool setup_frame_pool(uint32_t width, uint32_t height);
-
-  // Run one iteration of CEF's message loop.
   void do_message_loop_work();
-
-  // Shut down CEF cleanly.
   void shutdown();
 
   // --- Buffer management ---
-  // NOTE: These must be called from the CEF UI thread (TID_UI).
-  // The RPC server is responsible for posting to TID_UI.
+  int32_t create_buffer(const std::string &url,
+                        uint32_t viewport_width, uint32_t viewport_height);
+  void close_buffer(int32_t buffer_id);
+  size_t buffer_count() const;
 
-  int32_t create_buffer(int stub); // Stub
+  // --- Navigation ---
   void navigate(int32_t buffer_id, const std::string &url);
   void go_back(int32_t buffer_id);
   void go_forward(int32_t buffer_id);
@@ -55,15 +41,26 @@ public:
   // --- Queries ---
   std::string get_title(int32_t buffer_id);
   std::string get_url(int32_t buffer_id);
-  std::string frame_shm_name() const;
+  bool is_loading(int32_t buffer_id);
+  bool can_go_back(int32_t buffer_id);
+  bool can_go_forward(int32_t buffer_id);
+  double load_progress(int32_t buffer_id);
+  std::string frame_shm_name(int32_t buffer_id) const;
 
-  // BufferInfo get_buffer_info(int32_t buffer_id);
+  // --- Active buffer ---
+  int32_t active_buffer_id() const;
+  void set_active_buffer(int32_t buffer_id);
+  std::vector<int32_t> list_buffer_ids() const;
 
-  // --- Input injection ---
+  // --- Viewport ---
   void resize(int32_t buffer_id, int width, int height);
 
-  // --- Frame delivery ---
+  // --- Callbacks ---
   void set_frame_callback(FrameCallback cb);
+  void set_state_callback(StateCallback cb);
+
+  // --- Lua ---
+  LuaRuntime *lua_runtime();
 
 private:
   struct Impl;
