@@ -321,37 +321,51 @@ async fn run() -> anyhow::Result<()> {
                             match action {
                                 Action::GoBack => {
                                     let mut req = core.go_back_request();
-                                    req.get().set_buffer_id(0);
+                                    req.get().set_buffer_id(app.active_buffer_id);
                                     req.send().promise.await?;
                                 }
                                 Action::GoForward => {
                                     let mut req = core.go_forward_request();
-                                    req.get().set_buffer_id(0);
+                                    req.get().set_buffer_id(app.active_buffer_id);
                                     req.send().promise.await?;
                                 }
                                 Action::Reload => {
                                     let mut req = core.reload_request();
-                                    req.get().set_buffer_id(0);
+                                    req.get().set_buffer_id(app.active_buffer_id);
                                     req.send().promise.await?;
                                 }
                                 Action::Command(cmd) => {
-                                    let url = if cmd.contains('.') || cmd.starts_with("http") {
-                                        if !cmd.starts_with("http") {
-                                            format!("https://{}", cmd)
-                                        } else {
-                                            cmd
+                                    if cmd == "tabnew" || cmd == "tn" {
+                                        let mut req = core.create_buffer_request();
+                                        req.get().set_url("about:blank");
+                                        let _ = req.send().promise.await;
+                                    } else if cmd == "tabclose" || cmd == "tc" {
+                                        if app.buffers.len() <= 1 {
+                                            app.should_quit = true;
+                                        } else if app.active_buffer_id >= 0 {
+                                            let mut req = core.close_buffer_request();
+                                            req.get().set_buffer_id(app.active_buffer_id);
+                                            let _ = req.send().promise.await;
                                         }
                                     } else {
-                                        cmd
-                                    };
-                                    let mut req = core.navigate_request();
-                                    req.get().set_buffer_id(0);
-                                    req.get().set_url(&url);
-                                    req.send().promise.await?;
+                                        let url = if cmd.contains('.') || cmd.starts_with("http") {
+                                            if !cmd.starts_with("http") {
+                                                format!("https://{}", cmd)
+                                            } else {
+                                                cmd
+                                            }
+                                        } else {
+                                            cmd
+                                        };
+                                        let mut req = core.navigate_request();
+                                        req.get().set_buffer_id(app.active_buffer_id);
+                                        req.get().set_url(&url);
+                                        req.send().promise.await?;
+                                    }
                                 }
                                 Action::Navigate(url) => {
                                     let mut req = core.navigate_request();
-                                    req.get().set_buffer_id(0);
+                                    req.get().set_buffer_id(app.active_buffer_id);
                                     req.get().set_url(&url);
                                     req.send().promise.await?;
                                 }
@@ -359,7 +373,7 @@ async fn run() -> anyhow::Result<()> {
                                     // Send three events: RAWKEYDOWN, CHAR, KEYUP
                                     for key_type in [0u32, 3, 2] {
                                         let mut req = core.send_key_event_request();
-                                        req.get().set_buffer_id(0);
+                                        req.get().set_buffer_id(app.active_buffer_id);
                                         let mut event = req.get().init_event();
                                         event.set_type(match key_type {
                                             0 => types_capnp::KeyEventType::RawKeyDown,
@@ -373,6 +387,30 @@ async fn run() -> anyhow::Result<()> {
                                         let _ = req.send().promise.await;
                                     }
                                 }
+                                Action::NextTab => {
+                                    app.next_buffer();
+                                    let mut req = core.set_active_buffer_request();
+                                    req.get().set_buffer_id(app.active_buffer_id);
+                                    let _ = req.send().promise.await;
+                                }
+                                Action::PrevTab => {
+                                    app.prev_buffer();
+                                    let mut req = core.set_active_buffer_request();
+                                    req.get().set_buffer_id(app.active_buffer_id);
+                                    let _ = req.send().promise.await;
+                                }
+                                Action::NewTab(url) => {
+                                    let mut req = core.create_buffer_request();
+                                    req.get().set_url(&url);
+                                    let _ = req.send().promise.await;
+                                }
+                                Action::CloseTab => {
+                                    if app.active_buffer_id >= 0 {
+                                        let mut req = core.close_buffer_request();
+                                        req.get().set_buffer_id(app.active_buffer_id);
+                                        let _ = req.send().promise.await;
+                                    }
+                                }
                             }
                         }
                         if app.should_quit {
@@ -383,7 +421,7 @@ async fn run() -> anyhow::Result<()> {
                         dirty = true;
                         if let Ok((pw, ph)) = viewport_pixel_size() {
                             let mut req = core.resize_request();
-                            req.get().set_buffer_id(0);
+                            req.get().set_buffer_id(app.active_buffer_id);
                             req.get().set_width(pw);
                             req.get().set_height(ph);
                             let _ = req.send().promise.await;
@@ -409,18 +447,27 @@ async fn run() -> anyhow::Result<()> {
             Some(update) = state_rx.recv() => {
                 dirty = true;
                 match update {
-                    StateUpdate::Title { buffer_id: _, title } => {
-                        app.title = title;
+                    StateUpdate::Title { buffer_id, title } => {
+                        app.update_buffer_title(buffer_id, title);
                     }
-                    StateUpdate::Url { buffer_id: _, url } => {
-                        app.url = url;
+                    StateUpdate::Url { buffer_id, url } => {
+                        app.update_buffer_url(buffer_id, url);
                     }
-                    StateUpdate::Loading { buffer_id: _, loading, .. } => {
-                        app.loading = loading;
+                    StateUpdate::Loading { buffer_id, loading, .. } => {
+                        if let Some(buf) = app.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                            buf.loading = loading;
+                        }
+                        if buffer_id == app.active_buffer_id {
+                            app.loading = loading;
+                        }
                     }
                     StateUpdate::Progress { .. } => {}
-                    StateUpdate::BufferCreated { .. } => {}
-                    StateUpdate::BufferClosed { .. } => {}
+                    StateUpdate::BufferCreated { id, url, title } => {
+                        app.add_buffer(id, url, title);
+                    }
+                    StateUpdate::BufferClosed { buffer_id } => {
+                        app.remove_buffer(buffer_id);
+                    }
                 }
             }
         }

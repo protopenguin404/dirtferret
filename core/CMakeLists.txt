@@ -8,6 +8,7 @@ set(ENGINE_SOURCES
   engine/engine.cc
   engine/input.cc
   shm/frame_pool.cc
+  lua/runtime.cc
 )
 
 add_library(dirtferret-engine STATIC ${ENGINE_SOURCES})
@@ -15,11 +16,13 @@ add_library(dirtferret-engine STATIC ${ENGINE_SOURCES})
 target_include_directories(dirtferret-engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}       # for "engine/app.h", "shm/frame_pool.h"
   ${CEF_ROOT}                       # for "include/cef_app.h"
+  ${LUAJIT_INCLUDE_DIRS}            # for <lua.h>, <lauxlib.h>, <lualib.h>
 )
 
 target_link_libraries(dirtferret-engine PUBLIC
   libcef_dll_wrapper
   ${CEF_LIB_RELEASE}
+  ${LUAJIT_LIBRARIES}               # LuaJIT
   rt                                # for shm_open / shm_unlink
   pthread
 )

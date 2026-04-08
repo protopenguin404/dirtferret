@@ -1,4 +1,5 @@
 #include "engine/engine.h"
+#include "lua/runtime.h"
 #include "schema/core.capnp.h"
 #include <capnp/ez-rpc.h>
 #include <capnp/rpc-twoparty.h>
@@ -83,6 +84,13 @@ public:
 
     // Create the initial buffer
     engine_.create_buffer("about:blank", viewport_width_, viewport_height_);
+
+    // Load default Lua config
+    auto *lua = engine_.lua_runtime();
+    if (lua) {
+      lua->exec_string("package.path = 'lua/?.lua;lua/?/init.lua;' .. package.path");
+      lua->exec_file("lua/dirtferret/init.lua");
+    }
 
     return kj::READY_NOW;
   }

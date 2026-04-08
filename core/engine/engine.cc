@@ -2,6 +2,7 @@
 #include "engine/app.h"
 #include "engine/client.h"
 #include "engine/input.h"
+#include "lua/runtime.h"
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "shm/frame_pool.h"
@@ -27,6 +28,8 @@ struct Engine::Impl {
 
   FrameCallback frame_callback;
   StateCallback state_callback;
+
+  std::unique_ptr<LuaRuntime> lua;
 };
 
 Engine::Engine() : impl_(std::make_unique<Impl>()) {}
@@ -60,6 +63,12 @@ bool Engine::initialize(int argc, char *argv[]) {
 
   std::cerr << "[engine] CEF initialized." << std::endl;
   impl_->initialized = true;
+
+  impl_->lua = std::make_unique<LuaRuntime>();
+  if (!impl_->lua->initialize()) {
+    std::cerr << "[engine] Lua init failed (non-fatal)." << std::endl;
+  }
+
   return true;
 }
 
@@ -313,7 +322,7 @@ void Engine::set_state_callback(StateCallback cb) {
   impl_->state_callback = std::move(cb);
 }
 
-LuaRuntime *Engine::lua_runtime() { return nullptr; } // Phase 5
+LuaRuntime *Engine::lua_runtime() { return impl_->lua.get(); }
 
 void Engine::send_key_event(int32_t buffer_id, uint32_t key_type,
                             uint32_t key_code, uint32_t character,

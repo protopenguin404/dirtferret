@@ -18,6 +18,10 @@ find_package(CEF REQUIRED)
 # Build libcef_dll_wrapper from the CEF distribution (read-only nix store is fine)
 add_subdirectory(${CEF_LIBCEF_DLL_WRAPPER_PATH} ${CMAKE_BINARY_DIR}/libcef_dll_wrapper)
 
+# --- Lua setup ---
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LUAJIT REQUIRED luajit)
+
 # --- Cap'n Proto setup ---
 find_package(CapnProto REQUIRED)
 

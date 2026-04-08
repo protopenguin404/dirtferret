@@ -9,6 +9,13 @@ pub enum Mode {
     Command,
 }
 
+pub struct BufferEntry {
+    pub id: i32,
+    pub title: String,
+    pub url: String,
+    pub loading: bool,
+}
+
 pub struct App {
     pub mode: Mode,
     pub command_buf: String,
@@ -17,6 +24,8 @@ pub struct App {
     pub loading: bool,
     pub frame: Option<FrameData>,
     pub should_quit: bool,
+    pub buffers: Vec<BufferEntry>,
+    pub active_buffer_id: i32,
 }
 
 impl App {
@@ -29,6 +38,8 @@ impl App {
             loading: false,
             frame: None,
             should_quit: false,
+            buffers: Vec::new(),
+            active_buffer_id: -1,
         }
     }
 }
@@ -61,6 +72,8 @@ impl App {
                 KeyCode::Char('r') => Some(Action::Reload),
                 KeyCode::Char('H') => Some(Action::GoBack),
                 KeyCode::Char('L') => Some(Action::GoForward),
+                KeyCode::Char('t') => Some(Action::NextTab),
+                KeyCode::Char('T') => Some(Action::PrevTab),
                 _ => None,
             },
             Mode::Insert => match key.code {
@@ -96,6 +109,52 @@ impl App {
             },
         }
     }
+
+    pub fn add_buffer(&mut self, id: i32, url: String, title: String) {
+        self.buffers.push(BufferEntry { id, title, url, loading: false });
+        if self.active_buffer_id < 0 {
+            self.active_buffer_id = id;
+        }
+    }
+
+    pub fn remove_buffer(&mut self, id: i32) {
+        self.buffers.retain(|b| b.id != id);
+        if self.active_buffer_id == id {
+            self.active_buffer_id = self.buffers.first().map_or(-1, |b| b.id);
+        }
+    }
+
+    pub fn update_buffer_title(&mut self, id: i32, title: String) {
+        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == id) {
+            buf.title = title.clone();
+        }
+        if id == self.active_buffer_id {
+            self.title = title;
+        }
+    }
+
+    pub fn update_buffer_url(&mut self, id: i32, url: String) {
+        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == id) {
+            buf.url = url.clone();
+        }
+        if id == self.active_buffer_id {
+            self.url = url;
+        }
+    }
+
+    pub fn next_buffer(&mut self) {
+        if self.buffers.len() <= 1 { return; }
+        let idx = self.buffers.iter().position(|b| b.id == self.active_buffer_id).unwrap_or(0);
+        let next = (idx + 1) % self.buffers.len();
+        self.active_buffer_id = self.buffers[next].id;
+    }
+
+    pub fn prev_buffer(&mut self) {
+        if self.buffers.len() <= 1 { return; }
+        let idx = self.buffers.iter().position(|b| b.id == self.active_buffer_id).unwrap_or(0);
+        let prev = if idx == 0 { self.buffers.len() - 1 } else { idx - 1 };
+        self.active_buffer_id = self.buffers[prev].id;
+    }
 }
 
 pub enum Action {
@@ -105,6 +164,10 @@ pub enum Action {
     Reload,
     Command(String), // parsed in the event loop
     SendKey { character: u32, modifiers: u32 },
+    NextTab,
+    PrevTab,
+    NewTab(String),
+    CloseTab,
 }
 
 fn key_to_cef(key: KeyEvent) -> (u32, u32) {
@@ -152,8 +215,19 @@ pub fn render(frame: &mut Frame, app: &App, viewport_area: &mut Rect) {
     *viewport_area = viewport; // save for kitty graphics positioning
 
     // Tab bar
+    let tab_text = if app.buffers.is_empty() {
+        " dirtferret ".to_string()
+    } else {
+        app.buffers.iter().map(|b| {
+            if b.id == app.active_buffer_id {
+                format!(" [{}] ", if b.title.is_empty() { "..." } else { &b.title })
+            } else {
+                format!("  {}  ", if b.title.is_empty() { "..." } else { &b.title })
+            }
+        }).collect::<String>()
+    };
     frame.render_widget(
-        Paragraph::new(format!(" {} ", app.title))
+        Paragraph::new(tab_text)
             .style(Style::new().bg(Color::DarkGray).fg(Color::White)),
         tab_bar,
     );
