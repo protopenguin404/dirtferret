@@ -1,6 +1,7 @@
 #include "engine/engine.h"
 #include "engine/app.h"
 #include "engine/client.h"
+#include "engine/input.h"
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "shm/frame_pool.h"
@@ -313,6 +314,86 @@ void Engine::set_state_callback(StateCallback cb) {
 }
 
 LuaRuntime *Engine::lua_runtime() { return nullptr; } // Phase 5
+
+void Engine::send_key_event(int32_t buffer_id, uint32_t key_type,
+                            uint32_t key_code, uint32_t character,
+                            uint32_t modifiers) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end())
+    return;
+  auto browser = it->second.client->browser();
+  if (!browser)
+    return;
+
+  auto translated = translate_key(character, modifiers);
+
+  CefKeyEvent event;
+  event.windows_key_code = translated.windows_key_code;
+  event.native_key_code = translated.native_key_code;
+  event.character = translated.character;
+  event.unmodified_character = translated.unmodified_character;
+  event.modifiers = translated.modifiers;
+
+  switch (key_type) {
+  case 0: event.type = KEYEVENT_RAWKEYDOWN; break;
+  case 1: event.type = KEYEVENT_KEYDOWN; break;
+  case 2: event.type = KEYEVENT_KEYUP; break;
+  case 3: event.type = KEYEVENT_CHAR; break;
+  default: event.type = KEYEVENT_RAWKEYDOWN;
+  }
+
+  browser->GetHost()->SendKeyEvent(event);
+}
+
+void Engine::send_mouse_event(int32_t buffer_id, uint32_t event_type,
+                              int x, int y, uint32_t button,
+                              uint32_t modifiers) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end())
+    return;
+  auto browser = it->second.client->browser();
+  if (!browser)
+    return;
+
+  CefMouseEvent event;
+  event.x = x;
+  event.y = y;
+  event.modifiers = 0;
+  if (modifiers & MODIFIER_SHIFT) event.modifiers |= EVENTFLAG_SHIFT_DOWN;
+  if (modifiers & MODIFIER_CTRL) event.modifiers |= EVENTFLAG_CONTROL_DOWN;
+  if (modifiers & MODIFIER_ALT) event.modifiers |= EVENTFLAG_ALT_DOWN;
+
+  cef_mouse_button_type_t cef_button;
+  switch (button) {
+  case 0: cef_button = MBT_LEFT; break;
+  case 1: cef_button = MBT_MIDDLE; break;
+  case 2: cef_button = MBT_RIGHT; break;
+  default: cef_button = MBT_LEFT;
+  }
+
+  if (event_type == 2) {
+    browser->GetHost()->SendMouseMoveEvent(event, false);
+  } else {
+    bool mouse_up = (event_type == 1);
+    browser->GetHost()->SendMouseClickEvent(event, cef_button, mouse_up, 1);
+  }
+}
+
+void Engine::send_scroll_event(int32_t buffer_id, int delta_x, int delta_y) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end())
+    return;
+  auto browser = it->second.client->browser();
+  if (!browser)
+    return;
+
+  auto translated = translate_scroll(0, 0, delta_x, delta_y);
+  CefMouseEvent event;
+  event.x = 0;
+  event.y = 0;
+  event.modifiers = 0;
+  browser->GetHost()->SendMouseWheelEvent(event, translated.delta_x, translated.delta_y);
+}
 
 void Engine::do_message_loop_work() {
   if (impl_->initialized) {

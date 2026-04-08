@@ -40,7 +40,7 @@ TEST(InputTranslation, CtrlC) {
     auto result = translate_key('c', MODIFIER_CTRL);
     EXPECT_EQ(result.windows_key_code, 0x43);
     EXPECT_EQ(result.character, (uint32_t)3);
-    EXPECT_TRUE(result.modifiers & EVENTFLAG_CONTROL_DOWN);
+    EXPECT_TRUE(result.modifiers & DF_EVENTFLAG_CONTROL_DOWN);
 }
 
 TEST(InputTranslation, MouseClick) {

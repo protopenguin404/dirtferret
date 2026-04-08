@@ -55,6 +55,14 @@ public:
   // --- Viewport ---
   void resize(int32_t buffer_id, int width, int height);
 
+  // --- Input injection ---
+  void send_key_event(int32_t buffer_id, uint32_t key_type,
+                      uint32_t key_code, uint32_t character,
+                      uint32_t modifiers);
+  void send_mouse_event(int32_t buffer_id, uint32_t event_type,
+                        int x, int y, uint32_t button, uint32_t modifiers);
+  void send_scroll_event(int32_t buffer_id, int delta_x, int delta_y);
+
   // --- Callbacks ---
   void set_frame_callback(FrameCallback cb);
   void set_state_callback(StateCallback cb);

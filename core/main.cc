@@ -180,6 +180,38 @@ public:
     engine_.resize(id, viewport_width_, viewport_height_);
     return kj::READY_NOW;
   }
+
+  kj::Promise<void> sendKeyEvent(SendKeyEventContext context) override {
+    auto params = context.getParams();
+    auto id = params.getBufferId();
+    auto event = params.getEvent();
+    engine_.send_key_event(id,
+                           static_cast<uint32_t>(event.getType()),
+                           event.getKeyCode(),
+                           event.getCharacter(),
+                           event.getModifiers());
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> sendMouseEvent(SendMouseEventContext context) override {
+    auto params = context.getParams();
+    auto id = params.getBufferId();
+    auto event = params.getEvent();
+    engine_.send_mouse_event(id,
+                             static_cast<uint32_t>(event.getType()),
+                             event.getX(), event.getY(),
+                             static_cast<uint32_t>(event.getButton()),
+                             event.getModifiers());
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> sendScrollEvent(SendScrollEventContext context) override {
+    auto params = context.getParams();
+    engine_.send_scroll_event(params.getBufferId(),
+                              params.getDeltaX(),
+                              params.getDeltaY());
+    return kj::READY_NOW;
+  }
 };
 
 // --- CEF pump ---

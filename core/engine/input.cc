@@ -2,9 +2,9 @@
 
 static uint32_t capnp_to_cef_modifiers(uint32_t mods) {
   uint32_t flags = 0;
-  if (mods & MODIFIER_SHIFT) flags |= EVENTFLAG_SHIFT_DOWN;
-  if (mods & MODIFIER_CTRL) flags |= EVENTFLAG_CONTROL_DOWN;
-  if (mods & MODIFIER_ALT) flags |= EVENTFLAG_ALT_DOWN;
+  if (mods & MODIFIER_SHIFT) flags |= DF_EVENTFLAG_SHIFT_DOWN;
+  if (mods & MODIFIER_CTRL) flags |= DF_EVENTFLAG_CONTROL_DOWN;
+  if (mods & MODIFIER_ALT) flags |= DF_EVENTFLAG_ALT_DOWN;
   return flags;
 }
 

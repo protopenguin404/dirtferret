@@ -7,9 +7,9 @@ constexpr uint32_t MODIFIER_CTRL = 2;
 constexpr uint32_t MODIFIER_ALT = 4;
 constexpr uint32_t MODIFIER_META = 8;
 
-constexpr uint32_t EVENTFLAG_SHIFT_DOWN = 1 << 1;
-constexpr uint32_t EVENTFLAG_CONTROL_DOWN = 1 << 2;
-constexpr uint32_t EVENTFLAG_ALT_DOWN = 1 << 3;
+constexpr uint32_t DF_EVENTFLAG_SHIFT_DOWN = 1 << 1;
+constexpr uint32_t DF_EVENTFLAG_CONTROL_DOWN = 1 << 2;
+constexpr uint32_t DF_EVENTFLAG_ALT_DOWN = 1 << 3;
 
 struct TranslatedKey {
   int windows_key_code;
