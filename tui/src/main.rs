@@ -29,9 +29,19 @@ struct FrameNotification {
     height: u32,
 }
 
+enum StateUpdate {
+    Title { buffer_id: i32, title: String },
+    Url { buffer_id: i32, url: String },
+    Loading { buffer_id: i32, loading: bool, can_go_back: bool, can_go_forward: bool },
+    Progress { buffer_id: i32, progress: f64 },
+    BufferCreated { id: i32, url: String, title: String },
+    BufferClosed { buffer_id: i32 },
+}
+
 // Ui callback implementation - receives RPC calls from core
 struct UiImpl {
     frame_tx: tokio::sync::mpsc::Sender<FrameNotification>,
+    state_tx: tokio::sync::mpsc::Sender<StateUpdate>,
 }
 
 impl core_capnp::ui::Server for UiImpl {
@@ -63,49 +73,103 @@ impl core_capnp::ui::Server for UiImpl {
 
     fn on_title_changed(
         &mut self,
-        _params: core_capnp::ui::OnTitleChangedParams,
+        params: core_capnp::ui::OnTitleChangedParams,
         _results: core_capnp::ui::OnTitleChangedResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
+        if let Ok(p) = params.get() {
+            if let Ok(title) = p.get_title() {
+                if let Ok(title) = title.to_string() {
+                    let _ = self.state_tx.try_send(StateUpdate::Title {
+                        buffer_id: p.get_buffer_id(),
+                        title,
+                    });
+                }
+            }
+        }
         capnp::capability::Promise::ok(())
     }
 
     fn on_url_changed(
         &mut self,
-        _params: core_capnp::ui::OnUrlChangedParams,
+        params: core_capnp::ui::OnUrlChangedParams,
         _results: core_capnp::ui::OnUrlChangedResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
+        if let Ok(p) = params.get() {
+            if let Ok(url) = p.get_url() {
+                if let Ok(url) = url.to_string() {
+                    let _ = self.state_tx.try_send(StateUpdate::Url {
+                        buffer_id: p.get_buffer_id(),
+                        url,
+                    });
+                }
+            }
+        }
         capnp::capability::Promise::ok(())
     }
 
     fn on_loading_state_changed(
         &mut self,
-        _params: core_capnp::ui::OnLoadingStateChangedParams,
+        params: core_capnp::ui::OnLoadingStateChangedParams,
         _results: core_capnp::ui::OnLoadingStateChangedResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
+        if let Ok(p) = params.get() {
+            let _ = self.state_tx.try_send(StateUpdate::Loading {
+                buffer_id: p.get_buffer_id(),
+                loading: p.get_loading(),
+                can_go_back: p.get_can_go_back(),
+                can_go_forward: p.get_can_go_forward(),
+            });
+        }
         capnp::capability::Promise::ok(())
     }
 
     fn on_load_progress(
         &mut self,
-        _params: core_capnp::ui::OnLoadProgressParams,
+        params: core_capnp::ui::OnLoadProgressParams,
         _results: core_capnp::ui::OnLoadProgressResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
+        if let Ok(p) = params.get() {
+            let _ = self.state_tx.try_send(StateUpdate::Progress {
+                buffer_id: p.get_buffer_id(),
+                progress: p.get_progress(),
+            });
+        }
         capnp::capability::Promise::ok(())
     }
 
     fn on_buffer_created(
         &mut self,
-        _params: core_capnp::ui::OnBufferCreatedParams,
+        params: core_capnp::ui::OnBufferCreatedParams,
         _results: core_capnp::ui::OnBufferCreatedResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
+        if let Ok(p) = params.get() {
+            if let Ok(info) = p.get_info() {
+                let url = info.get_url().ok()
+                    .and_then(|s| s.to_string().ok())
+                    .unwrap_or_default();
+                let title = info.get_title().ok()
+                    .and_then(|s| s.to_string().ok())
+                    .unwrap_or_default();
+                let _ = self.state_tx.try_send(StateUpdate::BufferCreated {
+                    id: info.get_id(),
+                    url,
+                    title,
+                });
+            }
+        }
         capnp::capability::Promise::ok(())
     }
 
     fn on_buffer_closed(
         &mut self,
-        _params: core_capnp::ui::OnBufferClosedParams,
+        params: core_capnp::ui::OnBufferClosedParams,
         _results: core_capnp::ui::OnBufferClosedResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
+        if let Ok(p) = params.get() {
+            let _ = self.state_tx.try_send(StateUpdate::BufferClosed {
+                buffer_id: p.get_buffer_id(),
+            });
+        }
         capnp::capability::Promise::ok(())
     }
 
@@ -190,10 +254,11 @@ async fn run() -> anyhow::Result<()> {
 
     // Frame notification channel
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<FrameNotification>(4);
+    let (state_tx, mut state_rx) = tokio::sync::mpsc::channel::<StateUpdate>(32);
 
     // Attach UI to core
     let (pw, ph) = viewport_pixel_size()?;
-    let ui_impl = UiImpl { frame_tx };
+    let ui_impl = UiImpl { frame_tx, state_tx };
     let ui_client: core_capnp::ui::Client = capnp_rpc::new_client(ui_impl);
 
     let mut req = core.attach_ui_request();
@@ -320,6 +385,24 @@ async fn run() -> anyhow::Result<()> {
                     width: notif.width,
                     height: notif.height,
                 });
+            }
+
+            Some(update) = state_rx.recv() => {
+                dirty = true;
+                match update {
+                    StateUpdate::Title { buffer_id: _, title } => {
+                        app.title = title;
+                    }
+                    StateUpdate::Url { buffer_id: _, url } => {
+                        app.url = url;
+                    }
+                    StateUpdate::Loading { buffer_id: _, loading, .. } => {
+                        app.loading = loading;
+                    }
+                    StateUpdate::Progress { .. } => {}
+                    StateUpdate::BufferCreated { .. } => {}
+                    StateUpdate::BufferClosed { .. } => {}
+                }
             }
         }
     }

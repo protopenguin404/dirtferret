@@ -6,6 +6,7 @@ set(ENGINE_SOURCES
   engine/client.cc
   engine/renderer.cc
   engine/engine.cc
+  engine/input.cc
   shm/frame_pool.cc
 )
 

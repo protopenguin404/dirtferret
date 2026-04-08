@@ -44,7 +44,11 @@ add_test(NAME test-shm COMMAND test-shm)
 # add_test(NAME test-rpc COMMAND test-rpc)
 
 # --- test-input: terminal-to-CEF input translation tests ---
-add_executable(test-input test_input.cc)
+add_executable(
+  test-input
+  test_input.cc
+  ${CMAKE_SOURCE_DIR}/core/engine/input.cc
+)
 target_include_directories(test-input PRIVATE
   ${CMAKE_SOURCE_DIR}/core
 )
