@@ -1,10 +1,11 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
     Normal,
+    Insert,
     Command,
 }
 
@@ -53,10 +54,24 @@ impl App {
                     self.should_quit = true;
                     None
                 }
+                KeyCode::Char('i') => {
+                    self.mode = Mode::Insert;
+                    None
+                }
                 KeyCode::Char('r') => Some(Action::Reload),
                 KeyCode::Char('H') => Some(Action::GoBack),
                 KeyCode::Char('L') => Some(Action::GoForward),
                 _ => None,
+            },
+            Mode::Insert => match key.code {
+                KeyCode::Esc => {
+                    self.mode = Mode::Normal;
+                    None
+                }
+                _ => {
+                    let (character, modifiers) = key_to_cef(key);
+                    Some(Action::SendKey { character, modifiers })
+                }
             },
             Mode::Command => match key.code {
                 KeyCode::Esc => {
@@ -89,6 +104,40 @@ pub enum Action {
     GoForward,
     Reload,
     Command(String), // parsed in the event loop
+    SendKey { character: u32, modifiers: u32 },
+}
+
+fn key_to_cef(key: KeyEvent) -> (u32, u32) {
+    let character = match key.code {
+        KeyCode::Char(c) => c as u32,
+        KeyCode::Enter => '\r' as u32,
+        KeyCode::Tab => '\t' as u32,
+        KeyCode::Backspace => 0x08,
+        KeyCode::Delete => 0x2E,
+        KeyCode::Left => 0x25,
+        KeyCode::Right => 0x27,
+        KeyCode::Up => 0x26,
+        KeyCode::Down => 0x28,
+        KeyCode::Home => 0x24,
+        KeyCode::End => 0x23,
+        KeyCode::PageUp => 0x21,
+        KeyCode::PageDown => 0x22,
+        KeyCode::Esc => 0x1B,
+        _ => 0,
+    };
+
+    let mut modifiers: u32 = 0;
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        modifiers |= 1;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        modifiers |= 2;
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        modifiers |= 4;
+    }
+
+    (character, modifiers)
 }
 
 pub fn render(frame: &mut Frame, app: &App, viewport_area: &mut Rect) {
@@ -118,10 +167,15 @@ pub fn render(frame: &mut Frame, app: &App, viewport_area: &mut Rect) {
     }
 
     // Status line
+    let mode_indicator = match app.mode {
+        Mode::Normal => " NORMAL ",
+        Mode::Insert => " INSERT ",
+        Mode::Command => " COMMAND ",
+    };
     let status_text = if app.loading {
-        format!(" Loading... {}", app.url)
+        format!("{}Loading... {}", mode_indicator, app.url)
     } else {
-        format!(" {}", app.url)
+        format!("{}{}", mode_indicator, app.url)
     };
     frame.render_widget(
         Paragraph::new(status_text).style(Style::new().bg(Color::Blue).fg(Color::White)),
@@ -131,7 +185,7 @@ pub fn render(frame: &mut Frame, app: &App, viewport_area: &mut Rect) {
     // Command line
     let cmd_text = match app.mode {
         Mode::Command => format!(":{}", app.command_buf),
-        Mode::Normal => String::new(),
+        Mode::Normal | Mode::Insert => String::new(),
     };
     frame.render_widget(Paragraph::new(cmd_text), cmd);
 

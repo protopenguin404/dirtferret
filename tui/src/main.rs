@@ -1,4 +1,5 @@
 mod app;
+mod layout;
 mod shm;
 mod viewport;
 
@@ -353,6 +354,24 @@ async fn run() -> anyhow::Result<()> {
                                     req.get().set_buffer_id(0);
                                     req.get().set_url(&url);
                                     req.send().promise.await?;
+                                }
+                                Action::SendKey { character, modifiers } => {
+                                    // Send three events: RAWKEYDOWN, CHAR, KEYUP
+                                    for key_type in [0u32, 3, 2] {
+                                        let mut req = core.send_key_event_request();
+                                        req.get().set_buffer_id(0);
+                                        let mut event = req.get().init_event();
+                                        event.set_type(match key_type {
+                                            0 => types_capnp::KeyEventType::RawKeyDown,
+                                            2 => types_capnp::KeyEventType::KeyUp,
+                                            3 => types_capnp::KeyEventType::Char,
+                                            _ => types_capnp::KeyEventType::RawKeyDown,
+                                        });
+                                        event.set_key_code(character);
+                                        event.set_character(character);
+                                        event.set_modifiers(modifiers);
+                                        let _ = req.send().promise.await;
+                                    }
                                 }
                             }
                         }
