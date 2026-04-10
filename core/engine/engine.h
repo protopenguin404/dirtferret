@@ -13,6 +13,10 @@ using FrameCallback = std::function<void(int32_t buffer_id, const void *pixels,
 // Callback for buffer state changes.
 using StateCallback = std::function<void(int32_t buffer_id)>;
 
+// Callback for buffer lifecycle events.
+using BufferCreatedCallback = std::function<void(int32_t buffer_id)>;
+using BufferClosedCallback = std::function<void(int32_t buffer_id)>;
+
 class LuaRuntime; // forward declaration
 
 class Engine {
@@ -66,6 +70,8 @@ public:
   // --- Callbacks ---
   void set_frame_callback(FrameCallback cb);
   void set_state_callback(StateCallback cb);
+  void set_buffer_created_callback(BufferCreatedCallback cb);
+  void set_buffer_closed_callback(BufferClosedCallback cb);
 
   // --- Lua ---
   LuaRuntime *lua_runtime();

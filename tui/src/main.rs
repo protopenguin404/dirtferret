@@ -31,12 +31,32 @@ struct FrameNotification {
 }
 
 enum StateUpdate {
-    Title { buffer_id: i32, title: String },
-    Url { buffer_id: i32, url: String },
-    Loading { buffer_id: i32, loading: bool, can_go_back: bool, can_go_forward: bool },
-    Progress { buffer_id: i32, progress: f64 },
-    BufferCreated { id: i32, url: String, title: String },
-    BufferClosed { buffer_id: i32 },
+    Title {
+        buffer_id: i32,
+        title: String,
+    },
+    Url {
+        buffer_id: i32,
+        url: String,
+    },
+    Loading {
+        buffer_id: i32,
+        loading: bool,
+        can_go_back: bool,
+        can_go_forward: bool,
+    },
+    Progress {
+        buffer_id: i32,
+        progress: f64,
+    },
+    BufferCreated {
+        id: i32,
+        url: String,
+        title: String,
+    },
+    BufferClosed {
+        buffer_id: i32,
+    },
 }
 
 // Ui callback implementation - receives RPC calls from core
@@ -145,10 +165,14 @@ impl core_capnp::ui::Server for UiImpl {
     ) -> capnp::capability::Promise<(), capnp::Error> {
         if let Ok(p) = params.get() {
             if let Ok(info) = p.get_info() {
-                let url = info.get_url().ok()
+                let url = info
+                    .get_url()
+                    .ok()
                     .and_then(|s| s.to_string().ok())
                     .unwrap_or_default();
-                let title = info.get_title().ok()
+                let title = info
+                    .get_title()
+                    .ok()
                     .and_then(|s| s.to_string().ok())
                     .unwrap_or_default();
                 let _ = self.state_tx.try_send(StateUpdate::BufferCreated {
@@ -248,8 +272,7 @@ async fn run() -> anyhow::Result<()> {
         Default::default(),
     ));
     let mut rpc_system = capnp_rpc::RpcSystem::new(rpc_network, None);
-    let core: core_capnp::core::Client =
-        rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
+    let core: core_capnp::core::Client = rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
 
     tokio::task::spawn_local(rpc_system);
 
@@ -280,36 +303,44 @@ async fn run() -> anyhow::Result<()> {
 
     let mut app = App::new();
     let mut events = EventStream::new();
-    let mut render_interval = tokio::time::interval(Duration::from_millis(33));
+    let mut render_interval = tokio::time::interval(Duration::from_millis(200));
+    render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut current_shm: Option<ShmReader> = None;
-    let mut dirty = true; // redraw on first frame
+    let mut dirty = true; // need ratatui chrome redraw
+    let mut frame_dirty = false; // need kitty image update
 
     loop {
         tokio::select! {
             _ = render_interval.tick() => {
-                if !dirty {
+                if !dirty && !frame_dirty {
                     continue;
                 }
-                dirty = false;
 
                 let mut viewport_area = Rect::default();
                 terminal.draw(|f| app::render(f, &app, &mut viewport_area))?;
+                dirty = false;
 
-                // Write kitty graphics AFTER ratatui draw
-                if let Some(ref shm) = current_shm {
-                    if let Some(ref frame_data) = app.frame {
-                        let mut pixels = shm.as_bytes().to_vec();
-                        viewport::bgra_to_rgba(&mut pixels);
-                        let escape = viewport::kitty_display(
-                            &pixels, frame_data.width, frame_data.height, 1,
-                        );
+                // Only re-send kitty image when frame pixels actually changed
+                if frame_dirty {
+                    if let Some(ref shm) = current_shm {
+                        if let Some(ref frame_data) = app.frame {
+                            let mut pixels = shm.as_bytes().to_vec();
+                            viewport::bgra_to_rgba(&mut pixels);
 
-                        let mut stdout = std::io::stdout().lock();
-                        write!(stdout, "\x1b[{};{}H",
-                               viewport_area.y + 1, viewport_area.x + 1)?;
-                        stdout.write_all(&escape)?;
-                        stdout.flush()?;
+                            // File-based transfer: write RGBA to tmpfs, kitty reads
+                            // from file. Sends ~100 bytes instead of ~17MB base64.
+                            let escape = viewport::kitty_display_file(
+                                &pixels, frame_data.width, frame_data.height, 1,
+                            )?;
+
+                            let mut stdout = std::io::stdout().lock();
+                            write!(stdout, "\x1b[{};{}H",
+                                   viewport_area.y + 1, viewport_area.x + 1)?;
+                            stdout.write_all(&escape)?;
+                            stdout.flush()?;
+                        }
                     }
+                    frame_dirty = false;
                 }
             }
 
@@ -370,7 +401,9 @@ async fn run() -> anyhow::Result<()> {
                                     req.send().promise.await?;
                                 }
                                 Action::SendKey { character, modifiers } => {
-                                    // Send three events: RAWKEYDOWN, CHAR, KEYUP
+                                    // Fire-and-forget: send all three key events without
+                                    // awaiting each round trip (Cap'n Proto guarantees
+                                    // in-order delivery on a single connection)
                                     for key_type in [0u32, 3, 2] {
                                         let mut req = core.send_key_event_request();
                                         req.get().set_buffer_id(app.active_buffer_id);
@@ -384,7 +417,7 @@ async fn run() -> anyhow::Result<()> {
                                         event.set_key_code(character);
                                         event.set_character(character);
                                         event.set_modifiers(modifiers);
-                                        let _ = req.send().promise.await;
+                                        let _ = req.send();
                                     }
                                 }
                                 Action::NextTab => {
@@ -419,6 +452,7 @@ async fn run() -> anyhow::Result<()> {
                     }
                     Event::Resize(_cols, _rows) => {
                         dirty = true;
+                        frame_dirty = true;
                         if let Ok((pw, ph)) = viewport_pixel_size() {
                             let mut req = core.resize_request();
                             req.get().set_buffer_id(app.active_buffer_id);
@@ -432,15 +466,25 @@ async fn run() -> anyhow::Result<()> {
             }
 
             Some(notif) = frame_rx.recv() => {
-                dirty = true;
-                let size = (notif.width * notif.height * 4) as usize;
-                if current_shm.as_ref().map_or(true, |s| s.len != size) {
-                    current_shm = Some(ShmReader::open(&notif.shm_name, size)?);
+                // Drain channel: keep only the latest frame, skip stale ones
+                let mut latest = notif;
+                while let Ok(newer) = frame_rx.try_recv() {
+                    latest = newer;
                 }
+
+                dirty = true;
+                frame_dirty = true;
+                let size = (latest.width * latest.height * 4) as usize;
+
+                // Always re-open shm — the core double-buffers between
+                // frame-0 and frame-1 on each swap. Only checking size
+                // misses name changes and reads from the wrong buffer.
+                current_shm = Some(ShmReader::open(&latest.shm_name, size)?);
+
                 app.frame = Some(FrameData {
-                    shm_name: notif.shm_name,
-                    width: notif.width,
-                    height: notif.height,
+                    shm_name: latest.shm_name,
+                    width: latest.width,
+                    height: latest.height,
                 });
             }
 
@@ -473,11 +517,12 @@ async fn run() -> anyhow::Result<()> {
         }
     }
 
-    // Cleanup: delete kitty images, restore terminal
+    // Cleanup: delete kitty images, restore terminal, remove tmpfs frame file
     let mut stdout = std::io::stdout().lock();
     write!(stdout, "\x1b_Ga=d,d=a\x1b\\")?;
     stdout.flush()?;
     drop(stdout);
+    let _ = std::fs::remove_file("/dev/shm/dirtferret-display");
 
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(

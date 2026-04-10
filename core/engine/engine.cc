@@ -28,6 +28,8 @@ struct Engine::Impl {
 
   FrameCallback frame_callback;
   StateCallback state_callback;
+  BufferCreatedCallback buffer_created_callback;
+  BufferClosedCallback buffer_closed_callback;
 
   std::unique_ptr<LuaRuntime> lua;
 };
@@ -50,6 +52,7 @@ bool Engine::initialize(int argc, char *argv[]) {
   CefSettings settings;
   settings.windowless_rendering_enabled = true;
   settings.no_sandbox = true;
+  CefString(&settings.root_cache_path) = "/tmp/dirtferret";
 
   impl_->app->set_ready_callback([this]() {
     impl_->cef_ready = true;
@@ -83,7 +86,7 @@ int32_t Engine::create_buffer(const std::string &url,
   auto client = CefRefPtr<Client>(new Client());
 
   CefBrowserSettings browser_settings;
-  browser_settings.windowless_frame_rate = 30;
+  browser_settings.windowless_frame_rate = 10;
 
   CefWindowInfo window_info;
   window_info.SetAsWindowless(0);
@@ -121,8 +124,14 @@ int32_t Engine::create_buffer(const std::string &url,
             return;
 
           if ((uint32_t)w != pool->width() || (uint32_t)h != pool->height()) {
-            pool->resize(w, h);
+            if (!pool->resize(w, h)) {
+              std::cerr << "[engine] Frame pool resize failed for buffer "
+                        << browser_id << std::endl;
+              return;
+            }
           }
+          if (!pool->write_buffer())
+            return;
           std::memcpy(pool->write_buffer(), buf, pool->buffer_size());
           pool->swap();
 
@@ -137,6 +146,11 @@ int32_t Engine::create_buffer(const std::string &url,
       impl_->active_buffer = browser_id;
     }
 
+    // Notify buffer creation BEFORE state updates so TUI registers the buffer first
+    if (impl_->buffer_created_callback) {
+      impl_->buffer_created_callback(browser_id);
+    }
+
     if (impl_->state_callback) {
       impl_->state_callback(browser_id);
     }
@@ -144,6 +158,11 @@ int32_t Engine::create_buffer(const std::string &url,
 
   client->set_on_closed([this](int32_t browser_id) {
     std::cerr << "[engine] Buffer closed: " << browser_id << std::endl;
+
+    if (impl_->buffer_closed_callback) {
+      impl_->buffer_closed_callback(browser_id);
+    }
+
     impl_->buffers.erase(browser_id);
 
     if (impl_->active_buffer == browser_id) {
@@ -320,6 +339,14 @@ void Engine::set_frame_callback(FrameCallback cb) {
 
 void Engine::set_state_callback(StateCallback cb) {
   impl_->state_callback = std::move(cb);
+}
+
+void Engine::set_buffer_created_callback(BufferCreatedCallback cb) {
+  impl_->buffer_created_callback = std::move(cb);
+}
+
+void Engine::set_buffer_closed_callback(BufferClosedCallback cb) {
+  impl_->buffer_closed_callback = std::move(cb);
 }
 
 LuaRuntime *Engine::lua_runtime() { return impl_->lua.get(); }

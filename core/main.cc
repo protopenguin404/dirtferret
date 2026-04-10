@@ -82,6 +82,27 @@ public:
       }
     });
 
+    // Buffer lifecycle notifications
+    engine_.set_buffer_created_callback([this](int32_t buffer_id) {
+      KJ_IF_MAYBE(ui, ui_) {
+        auto req = ui->onBufferCreatedRequest();
+        auto info = req.initInfo();
+        info.setId(buffer_id);
+        info.setUrl(engine_.get_url(buffer_id));
+        info.setTitle(engine_.get_title(buffer_id));
+        info.setLoading(engine_.is_loading(buffer_id));
+        req.send().detach([](kj::Exception &&) {});
+      }
+    });
+
+    engine_.set_buffer_closed_callback([this](int32_t buffer_id) {
+      KJ_IF_MAYBE(ui, ui_) {
+        auto req = ui->onBufferClosedRequest();
+        req.setBufferId(buffer_id);
+        req.send().detach([](kj::Exception &&) {});
+      }
+    });
+
     // Create the initial buffer
     engine_.create_buffer("about:blank", viewport_width_, viewport_height_);
 

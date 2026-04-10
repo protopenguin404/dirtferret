@@ -12,7 +12,13 @@ class App : public CefApp, public CefBrowserProcessHandler {
 
   void set_ready_callback(ReadyCallback cb) { ready_callback_ = std::move(cb); }
 
+  // CefApp
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override;
+  void OnBeforeCommandLineProcessing(
+      const CefString& process_type,
+      CefRefPtr<CefCommandLine> command_line) override;
+
+  // CefBrowserProcessHandler
   void OnContextInitialized() override;
 
  private:
