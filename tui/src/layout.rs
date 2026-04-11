@@ -14,7 +14,7 @@ pub fn compute_layout(
     regions: &mut [&mut Region],
     pixel_width: u32,
     pixel_height: u32,
-    _cell_cols: u16,
+    cell_cols: u16,
     cell_rows: u16,
 ) -> anyhow::Result<()> {
     let cell_h = if cell_rows > 0 {
@@ -32,6 +32,8 @@ pub fn compute_layout(
         if let Anchor::Top { height_cells } = region.anchor {
             region.cell_row = top_row;
             region.pixel_y = (top_row as u32 - 1) * cell_h;
+            region.cell_cols = cell_cols;
+            region.cell_rows_span = height_cells;
 
             let region_pixel_height = height_cells as u32 * cell_h;
             region.resize(pixel_width, region_pixel_height)?;
@@ -46,6 +48,8 @@ pub fn compute_layout(
             bottom_available -= height_cells;
             region.cell_row = bottom_available + 1;
             region.pixel_y = bottom_available as u32 * cell_h;
+            region.cell_cols = cell_cols;
+            region.cell_rows_span = height_cells;
 
             let region_pixel_height = height_cells as u32 * cell_h;
             region.resize(pixel_width, region_pixel_height)?;
@@ -76,6 +80,8 @@ pub fn compute_layout(
 
                 region.cell_row = current_row;
                 region.pixel_y = (current_row as u32 - 1) * cell_h;
+                region.cell_cols = cell_cols;
+                region.cell_rows_span = cells;
 
                 let region_pixel_height = cells as u32 * cell_h;
                 region.resize(pixel_width, region_pixel_height)?;

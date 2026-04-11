@@ -32,6 +32,12 @@ pub struct Region {
     pub pixel_width: u32,
     /// Height in pixels (set by layout engine).
     pub pixel_height: u32,
+    /// Display width in terminal columns (set by layout engine).
+    /// Used as kitty `c=` to constrain image to exact cell bounds.
+    pub cell_cols: u16,
+    /// Display height in terminal rows (set by layout engine).
+    /// Used as kitty `r=` to constrain image to exact cell bounds.
+    pub cell_rows_span: u16,
     dirty: bool,
 }
 
@@ -58,6 +64,8 @@ impl Region {
             pixel_y: 0,
             pixel_width: 0,
             pixel_height: 0,
+            cell_cols: 0,
+            cell_rows_span: 0,
             dirty: false,
         })
     }
@@ -134,8 +142,10 @@ impl Region {
 
         write!(
             stdout,
-            "\x1b[{};1H\x1b_Ga=T,t=f,f=32,s={},v={},i={},C=1,q=2;{}\x1b\\",
-            self.cell_row, self.pixel_width, self.pixel_height, self.image_id, self.path_b64
+            "\x1b[{};1H\x1b_Ga=T,t=f,f=32,s={},v={},c={},r={},i={},C=1,q=2;{}\x1b\\",
+            self.cell_row, self.pixel_width, self.pixel_height,
+            self.cell_cols, self.cell_rows_span,
+            self.image_id, self.path_b64
         )?;
 
         self.dirty = false;
