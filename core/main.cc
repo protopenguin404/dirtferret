@@ -241,23 +241,28 @@ public:
     if (lua && lua->state()) {
       auto *L = lua->state();
       // dirtferret.keymap._maps[mode][key]
+      // Check each level for nil to avoid SIGSEGV if Lua init failed
       lua_getglobal(L, "dirtferret");
-      lua_getfield(L, -1, "keymap");
-      lua_getfield(L, -1, "_maps");
-      lua_getfield(L, -1, mode_str.c_str());
-
       if (lua_istable(L, -1)) {
-        // Build key string from character
-        std::string key_str;
-        if (character < 128 && character > 0) {
-          key_str = std::string(1, static_cast<char>(character));
-        }
-        if (!key_str.empty()) {
-          lua_getfield(L, -1, key_str.c_str());
-          if (lua_isstring(L, -1)) {
-            action = lua_tostring(L, -1);
+        lua_getfield(L, -1, "keymap");
+        if (lua_istable(L, -1)) {
+          lua_getfield(L, -1, "_maps");
+          if (lua_istable(L, -1)) {
+            lua_getfield(L, -1, mode_str.c_str());
+            if (lua_istable(L, -1)) {
+              std::string key_str;
+              if (character < 128 && character > 0) {
+                key_str = std::string(1, static_cast<char>(character));
+              }
+              if (!key_str.empty()) {
+                lua_getfield(L, -1, key_str.c_str());
+                if (lua_isstring(L, -1)) {
+                  action = lua_tostring(L, -1);
+                }
+                lua_pop(L, 1);
+              }
+            }
           }
-          lua_pop(L, 1);
         }
       }
       lua_settop(L, 0);

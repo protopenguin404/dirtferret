@@ -276,6 +276,16 @@ async fn async_main() -> anyhow::Result<()> {
         }
     };
 
+    // Resize CEF to viewport rect (attachUi sent full terminal size,
+    // but the viewport is smaller due to chrome rows)
+    {
+        let mut req = core.resize_request();
+        req.get().set_buffer_id(active_id);
+        req.get().set_width(vp_rect.width);
+        req.get().set_height(vp_rect.height);
+        let _ = req.send().promise.await;
+    }
+
     // --- Terminal setup ---
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
