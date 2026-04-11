@@ -1,3 +1,4 @@
+mod input;
 mod shm;
 mod viewport;
 
@@ -160,74 +161,6 @@ impl core_capnp::ui::Server for UiImpl {
     }
 }
 
-// --- Input translation ---
-
-fn key_to_cef(code: KeyCode, modifiers: KeyModifiers) -> (u32, u32) {
-    let character = match code {
-        KeyCode::Char(c) => c as u32,
-        KeyCode::Enter => '\r' as u32,
-        KeyCode::Tab => '\t' as u32,
-        KeyCode::Backspace => 0x08,
-        KeyCode::Delete => 0x2E,
-        KeyCode::Left => 0x25,
-        KeyCode::Right => 0x27,
-        KeyCode::Up => 0x26,
-        KeyCode::Down => 0x28,
-        KeyCode::Home => 0x24,
-        KeyCode::End => 0x23,
-        KeyCode::PageUp => 0x21,
-        KeyCode::PageDown => 0x22,
-        KeyCode::Esc => 0x1B,
-        _ => 0,
-    };
-    let mut mods: u32 = 0;
-    if modifiers.contains(KeyModifiers::SHIFT) {
-        mods |= 1;
-    }
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        mods |= 2;
-    }
-    if modifiers.contains(KeyModifiers::ALT) {
-        mods |= 4;
-    }
-    (character, mods)
-}
-
-fn mouse_mods_to_cef(modifiers: KeyModifiers) -> u32 {
-    let mut mods: u32 = 0;
-    if modifiers.contains(KeyModifiers::SHIFT) {
-        mods |= 1;
-    }
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        mods |= 2;
-    }
-    if modifiers.contains(KeyModifiers::ALT) {
-        mods |= 4;
-    }
-    mods
-}
-
-fn cell_to_pixel(col: u16, row: u16) -> (i32, i32) {
-    let Ok(win) = crossterm::terminal::window_size() else {
-        return (col as i32 * 8, row as i32 * 16);
-    };
-    if win.columns == 0 || win.rows == 0 {
-        return (col as i32 * 8, row as i32 * 16);
-    }
-    let cell_w = win.width as f64 / win.columns as f64;
-    let cell_h = win.height as f64 / win.rows as f64;
-    ((col as f64 * cell_w) as i32, (row as f64 * cell_h) as i32)
-}
-
-fn viewport_pixel_size() -> anyhow::Result<(u32, u32)> {
-    let win = crossterm::terminal::window_size()?;
-    if win.width > 0 && win.height > 0 {
-        Ok((win.width as u32, win.height as u32))
-    } else {
-        Ok((win.columns as u32 * 8, win.rows as u32 * 16))
-    }
-}
-
 // --- BGRA→RGBA conversion for a sub-rectangle ---
 
 fn convert_rect_bgra_to_rgba(
@@ -294,7 +227,7 @@ impl ShmPair {
 // --- Main ---
 
 async fn async_main() -> anyhow::Result<()> {
-    let (pw, ph) = viewport_pixel_size()?;
+    let (pw, ph) = input::viewport_pixel_size()?;
     eprintln!("[tui] Terminal viewport: {}x{} pixels", pw, ph);
 
     // --- RPC ---
@@ -500,7 +433,7 @@ async fn async_main() -> anyhow::Result<()> {
                             }
                         }
 
-                        let (character, modifiers) = key_to_cef(key.code, key.modifiers);
+                        let (character, modifiers) = input::key_to_cef(key.code, key.modifiers);
                         if character == 0 { continue; }
 
                         for key_type in [0u32, 3, 2] {
@@ -521,7 +454,7 @@ async fn async_main() -> anyhow::Result<()> {
                     }
 
                     Event::Mouse(mouse) => {
-                        let (px, py) = cell_to_pixel(mouse.column, mouse.row);
+                        let (px, py) = input::cell_to_pixel(mouse.column, mouse.row);
                         match mouse.kind {
                             MouseEventKind::Down(btn) | MouseEventKind::Up(btn) => {
                                 let is_up = matches!(mouse.kind, MouseEventKind::Up(_));
@@ -540,7 +473,7 @@ async fn async_main() -> anyhow::Result<()> {
                                     MouseButton::Middle => types_capnp::MouseButton::Middle,
                                     MouseButton::Right => types_capnp::MouseButton::Right,
                                 });
-                                ev.set_modifiers(mouse_mods_to_cef(mouse.modifiers));
+                                ev.set_modifiers(input::mouse_mods_to_cef(mouse.modifiers));
                                 let _ = req.send();
                             }
                             MouseEventKind::Moved | MouseEventKind::Drag(_) => {
@@ -551,7 +484,7 @@ async fn async_main() -> anyhow::Result<()> {
                                 ev.set_x(px);
                                 ev.set_y(py);
                                 ev.set_button(types_capnp::MouseButton::None);
-                                ev.set_modifiers(mouse_mods_to_cef(mouse.modifiers));
+                                ev.set_modifiers(input::mouse_mods_to_cef(mouse.modifiers));
                                 let _ = req.send();
                             }
                             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
@@ -573,7 +506,7 @@ async fn async_main() -> anyhow::Result<()> {
                     }
 
                     Event::Resize(_, _) => {
-                        if let Ok((new_pw, new_ph)) = viewport_pixel_size() {
+                        if let Ok((new_pw, new_ph)) = input::viewport_pixel_size() {
                             let mut req = core.resize_request();
                             req.get().set_buffer_id(active_buffer_id);
                             req.get().set_width(new_pw);
