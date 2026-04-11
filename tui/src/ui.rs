@@ -1,26 +1,40 @@
 // tui/src/ui.rs
-use ratatui::prelude::*;
-use ratatui::widgets::{Paragraph, Tabs};
-use ratatui::style::{Color, Modifier, Style};
-
-use crate::mux::Rect as PixelRect;
+//
+// Chrome text builders for the region-based compositing model.
+// No ratatui — ANSI escape sequences only.
+//
+// Chrome rendering is two layers:
+//   1. Solid-color pixel fill (kitty image) — background color
+//   2. ANSI text overlay (terminal font) — sharp text at any size
+//
+// This module produces the ANSI text layer. The pixel fill is handled
+// by the Region/Compositor.
 
 /// One segment of the status line.
 #[derive(Clone)]
 pub struct Segment {
     pub name: String,
     pub text: String,
-    pub style: Style,
+    /// Foreground color as (R, G, B).
+    pub fg: (u8, u8, u8),
+    /// Optional background color as (R, G, B).
+    /// When None, the kitty image pixel fill shows through.
+    pub bg: Option<(u8, u8, u8)>,
+    pub bold: bool,
 }
 
-/// The visual frame: tab bar + status line.
-/// Computes the viewport rect from total terminal area.
+/// The visual chrome state: tab bar + status line.
+/// Produces ANSI escape strings for text overlay on kitty pixel regions.
 pub struct Ui {
     status_left: Vec<Segment>,
     status_center: Vec<Segment>,
     status_right: Vec<Segment>,
     tab_titles: Vec<String>,
     active_tab: usize,
+    /// RGBA fill color for tab bar region pixels.
+    pub tab_bar_bg: [u8; 4],
+    /// RGBA fill color for status bar region pixels.
+    pub status_bar_bg: [u8; 4],
 }
 
 impl Ui {
@@ -28,17 +42,23 @@ impl Ui {
         let status_left = vec![Segment {
             name: "mode".into(),
             text: "NORMAL".into(),
-            style: Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
+            fg: (0, 0, 0),
+            bg: Some((0, 200, 0)),
+            bold: true,
         }];
         let status_center = vec![Segment {
             name: "url".into(),
             text: String::new(),
-            style: Style::default().fg(Color::White),
+            fg: (200, 200, 200),
+            bg: None,
+            bold: false,
         }];
         let status_right = vec![Segment {
             name: "fps".into(),
             text: String::new(),
-            style: Style::default().fg(Color::DarkGray),
+            fg: (100, 100, 100),
+            bg: None,
+            bold: false,
         }];
 
         Ui {
@@ -47,43 +67,43 @@ impl Ui {
             status_right,
             tab_titles: Vec::new(),
             active_tab: 0,
+            tab_bar_bg: [40, 40, 40, 255],
+            status_bar_bg: [50, 50, 50, 255],
         }
     }
 
-    /// Compute the pixel rect available for viewports after chrome takes its rows.
-    /// Tab bar = 1 row at top, status line = 1 row at bottom.
-    pub fn viewport_rect(&self, total_cols: u16, total_rows: u16, pixel_w: u32, pixel_h: u32) -> PixelRect {
-        let chrome_rows: u16 = 2; // 1 tab bar + 1 status line
-        let content_rows = total_rows.saturating_sub(chrome_rows);
-        let row_h = if total_rows > 0 { pixel_h / total_rows as u32 } else { 16 };
-        PixelRect {
-            x: 0,
-            y: row_h, // skip tab bar row
-            width: pixel_w,
-            height: content_rows as u32 * row_h,
-        }
-    }
-
-    /// Update the mode segment.
+    /// Update the mode segment text and colors.
     pub fn set_mode(&mut self, mode: &str) {
         if let Some(seg) = self.status_left.iter_mut().find(|s| s.name == "mode") {
             seg.text = mode.to_uppercase();
-            seg.style = match mode {
-                "normal" => Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
-                "passthrough" => Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
-                _ => Style::default().fg(Color::Black).bg(Color::Blue).add_modifier(Modifier::BOLD),
-            };
+            match mode {
+                "normal" => {
+                    seg.fg = (0, 0, 0);
+                    seg.bg = Some((0, 200, 0));
+                    seg.bold = true;
+                }
+                "passthrough" => {
+                    seg.fg = (0, 0, 0);
+                    seg.bg = Some((200, 200, 0));
+                    seg.bold = true;
+                }
+                _ => {
+                    seg.fg = (0, 0, 0);
+                    seg.bg = Some((0, 100, 200));
+                    seg.bold = true;
+                }
+            }
         }
     }
 
-    /// Update the URL segment.
+    /// Update the URL segment text.
     pub fn set_url(&mut self, url: &str) {
         if let Some(seg) = self.status_center.iter_mut().find(|s| s.name == "url") {
             seg.text = url.to_string();
         }
     }
 
-    /// Update the FPS segment.
+    /// Update the FPS segment text.
     pub fn set_fps(&mut self, fps: usize) {
         if let Some(seg) = self.status_right.iter_mut().find(|s| s.name == "fps") {
             seg.text = format!("{}fps", fps);
@@ -96,84 +116,247 @@ impl Ui {
         self.active_tab = active;
     }
 
-    /// Render the tab bar and status line using ratatui.
-    pub fn render(&self, frame: &mut ratatui::Frame) {
-        let area = frame.area();
-        if area.height < 3 { return; }
+    /// Build ANSI escape string for the tab bar text overlay.
+    ///
+    /// Positions cursor at row 1, disables autowrap, renders tab titles
+    /// separated by `|`, truncates to `cols` width.
+    pub fn tab_bar_ansi(&self, cols: u16) -> String {
+        let max_w = cols as usize;
+        let mut out = String::with_capacity(256);
 
-        // Tab bar: top row
-        let tab_area = ratatui::layout::Rect {
-            x: area.x, y: area.y, width: area.width, height: 1,
-        };
-        let titles: Vec<Line> = self.tab_titles.iter().enumerate().map(|(i, t)| {
-            let style = if i == self.active_tab {
-                Style::default().fg(Color::White).bg(Color::DarkGray).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            Line::from(Span::styled(format!(" {} ", t), style))
-        }).collect();
+        // Cursor to row 1, col 1; disable autowrap
+        out.push_str("\x1b[1;1H\x1b[?7l");
 
-        if !titles.is_empty() {
-            let tabs = Tabs::new(titles)
-                .select(self.active_tab)
-                .style(Style::default().bg(Color::Black))
-                .divider(Span::raw("|"));
-            frame.render_widget(tabs, tab_area);
+        if self.tab_titles.is_empty() {
+            // Reset and re-enable autowrap
+            out.push_str("\x1b[0m\x1b[?7h");
+            return out;
         }
 
-        // Status line: bottom row
-        let status_area = ratatui::layout::Rect {
-            x: area.x, y: area.y + area.height - 1, width: area.width, height: 1,
-        };
+        let mut width_used: usize = 0;
+        let mut truncated = false;
 
-        // Build spans
-        let left_span = self.status_left.first().map(|s| {
-            Span::styled(format!(" {} ", s.text), s.style)
-        }).unwrap_or_default();
+        for (i, title) in self.tab_titles.iter().enumerate() {
+            // Separator before all tabs except the first
+            if i > 0 {
+                // Check if separator fits
+                if width_used + 1 > max_w {
+                    truncated = true;
+                    break;
+                }
+                // Gray separator
+                out.push_str("\x1b[38;2;80;80;80m|");
+                width_used += 1;
+            }
 
-        let center_text: String = self.status_center.iter().map(|s| s.text.clone()).collect();
-        let center_span = Span::styled(
-            format!(" {} ", center_text),
-            self.status_center.first().map(|s| s.style).unwrap_or_default(),
-        );
+            // Format tab text with padding: " title "
+            let padded = format!(" {} ", title);
+            let tab_len = padded.len();
 
-        let right_text: String = self.status_right.iter().map(|s| format!(" {} ", s.text)).collect();
-        let right_span = Span::styled(
-            right_text.clone(),
-            self.status_right.first().map(|s| s.style).unwrap_or_default(),
-        );
+            // Check if this tab fits
+            if width_used + tab_len > max_w {
+                // Try to fit a truncated version
+                let remaining = max_w.saturating_sub(width_used);
+                if remaining > 3 {
+                    // Apply style for this tab
+                    if i == self.active_tab {
+                        out.push_str("\x1b[38;2;255;255;255m\x1b[1m");
+                    } else {
+                        out.push_str("\x1b[38;2;150;150;150m");
+                    }
+                    // Truncate with ellipsis
+                    let truncated_text: String = padded.chars().take(remaining - 3).collect();
+                    out.push_str(&truncated_text);
+                    out.push_str("...");
+                }
+                truncated = true;
+                break;
+            }
 
-        // Pad to fill width
-        let left_len = self.status_left.first().map(|s| s.text.len() + 2).unwrap_or(0);
-        let center_len = center_text.len() + 2;
-        let right_len = right_text.len();
-        let used = left_len + center_len + right_len;
-        let padding = (status_area.width as usize).saturating_sub(used);
-        let left_pad = padding / 2;
-        let right_pad = padding - left_pad;
+            // Apply style
+            if i == self.active_tab {
+                out.push_str("\x1b[38;2;255;255;255m\x1b[1m");
+            } else {
+                out.push_str("\x1b[38;2;150;150;150m");
+            }
 
-        let line = Line::from(vec![
-            left_span,
-            Span::raw(" ".repeat(left_pad)),
-            center_span,
-            Span::raw(" ".repeat(right_pad)),
-            right_span,
-        ]);
+            out.push_str(&padded);
+            width_used += tab_len;
+        }
 
-        let status = Paragraph::new(line)
-            .style(Style::default().bg(Color::DarkGray));
-        frame.render_widget(status, status_area);
+        // If we truncated and there's room for an indicator, it's already handled above
+        let _ = truncated;
 
-        // Mark viewport rows as skip so ratatui doesn't overwrite kitty graphics
-        let viewport_start = area.y + 1;
-        let viewport_end = area.y + area.height - 1;
-        for row in viewport_start..viewport_end {
-            for col in area.x..area.x + area.width {
-                if let Some(cell) = frame.buffer_mut().cell_mut(ratatui::layout::Position { x: col, y: row }) {
-                    cell.set_skip(true);
+        // Reset attributes, re-enable autowrap
+        out.push_str("\x1b[0m\x1b[?7h");
+
+        out
+    }
+
+    /// Build ANSI escape string for the status line text overlay.
+    ///
+    /// Positions cursor at the given row, disables autowrap, renders
+    /// left/center/right segment groups with padding, truncates to `cols`.
+    pub fn status_line_ansi(&self, cols: u16, rows: u16) -> String {
+        let max_w = cols as usize;
+        let mut out = String::with_capacity(512);
+
+        // Cursor to last row, col 1; disable autowrap
+        out.push_str(&format!("\x1b[{};1H\x1b[?7l", rows));
+
+        // Pre-render each group into (ansi_string, display_width) pairs
+        let left = Self::render_segments(&self.status_left);
+        let center = Self::render_segments(&self.status_center);
+        let right = Self::render_segments(&self.status_right);
+
+        let left_w = left.1;
+        let center_w = center.1;
+        let right_w = right.1;
+        let total_content = left_w + center_w + right_w;
+
+        if total_content >= max_w {
+            // Everything doesn't fit — truncate
+            let mut budget = max_w;
+
+            // Left segments always get priority
+            if left_w <= budget {
+                out.push_str(&left.0);
+                budget -= left_w;
+            } else {
+                out.push_str(&Self::render_segments_truncated(&self.status_left, budget));
+                budget = 0;
+            }
+
+            // Then center if room
+            if budget > 0 && center_w > 0 {
+                out.push(' ');
+                budget = budget.saturating_sub(1);
+                if center_w <= budget {
+                    out.push_str(&center.0);
+                    budget -= center_w;
+                } else if budget > 3 {
+                    out.push_str(&Self::render_segments_truncated(&self.status_center, budget));
+                    budget = 0;
+                } else {
+                    budget = 0;
                 }
             }
+
+            // Right if somehow room remains
+            if budget > 0 && right_w > 0 {
+                out.push(' ');
+                budget = budget.saturating_sub(1);
+                if right_w <= budget {
+                    out.push_str(&right.0);
+                } else if budget > 3 {
+                    out.push_str(&Self::render_segments_truncated(&self.status_right, budget));
+                }
+            }
+        } else {
+            // Everything fits — distribute gaps
+            let total_gap = max_w - total_content;
+            let left_gap = total_gap / 2;
+            let right_gap = total_gap - left_gap;
+
+            out.push_str(&left.0);
+            if left_gap > 0 {
+                out.push_str(&" ".repeat(left_gap));
+            }
+            out.push_str(&center.0);
+            if right_gap > 0 {
+                out.push_str(&" ".repeat(right_gap));
+            }
+            out.push_str(&right.0);
         }
+
+        // Reset attributes, re-enable autowrap
+        out.push_str("\x1b[0m\x1b[?7h");
+
+        out
+    }
+
+    /// Render a group of segments into an ANSI string and its display width.
+    /// Each segment is rendered as ` text ` with appropriate SGR codes.
+    fn render_segments(segments: &[Segment]) -> (String, usize) {
+        let mut ansi = String::new();
+        let mut width: usize = 0;
+
+        for seg in segments {
+            if seg.text.is_empty() {
+                continue;
+            }
+
+            let padded = format!(" {} ", seg.text);
+            let seg_w = padded.len();
+
+            // Build SGR sequence
+            let (r, g, b) = seg.fg;
+            ansi.push_str(&format!("\x1b[38;2;{};{};{}m", r, g, b));
+
+            if let Some((br, bg, bb)) = seg.bg {
+                ansi.push_str(&format!("\x1b[48;2;{};{};{}m", br, bg, bb));
+            }
+
+            if seg.bold {
+                ansi.push_str("\x1b[1m");
+            }
+
+            ansi.push_str(&padded);
+            width += seg_w;
+
+            // Reset after each segment so styles don't bleed
+            ansi.push_str("\x1b[0m");
+        }
+
+        (ansi, width)
+    }
+
+    /// Render segments truncated to fit within `budget` display columns.
+    /// Adds `...` suffix if truncation occurs.
+    fn render_segments_truncated(segments: &[Segment], budget: usize) -> String {
+        let mut ansi = String::new();
+        let mut remaining = budget;
+
+        for seg in segments {
+            if seg.text.is_empty() || remaining == 0 {
+                continue;
+            }
+
+            let padded = format!(" {} ", seg.text);
+            let seg_w = padded.len();
+
+            // Build SGR
+            let (r, g, b) = seg.fg;
+            ansi.push_str(&format!("\x1b[38;2;{};{};{}m", r, g, b));
+
+            if let Some((br, bg, bb)) = seg.bg {
+                ansi.push_str(&format!("\x1b[48;2;{};{};{}m", br, bg, bb));
+            }
+
+            if seg.bold {
+                ansi.push_str("\x1b[1m");
+            }
+
+            if seg_w <= remaining {
+                ansi.push_str(&padded);
+                remaining -= seg_w;
+            } else {
+                // Truncate with ellipsis
+                if remaining > 3 {
+                    let truncated: String = padded.chars().take(remaining - 3).collect();
+                    ansi.push_str(&truncated);
+                    ansi.push_str("...");
+                } else {
+                    // Not enough room for ellipsis, just fill what we can
+                    let truncated: String = padded.chars().take(remaining).collect();
+                    ansi.push_str(&truncated);
+                }
+                remaining = 0;
+            }
+
+            ansi.push_str("\x1b[0m");
+        }
+
+        ansi
     }
 }

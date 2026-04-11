@@ -1,7 +1,6 @@
 use base64::Engine as _;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 
-use crate::mux::Rect;
 use crate::shm;
 
 /// Cached shm state: both frame buffers mapped, switch by slot.
@@ -52,20 +51,13 @@ fn convert_rect_bgra_to_rgba(
     }
 }
 
-/// Self-contained rendering unit for one CEF buffer.
-/// Owns its shm readers, RGBA buffer, display file, and kitty image ID.
-/// Given a Rect, renders into that screen region. Knows nothing about
-/// tabs, modes, or layout.
+/// Frame data source for one CEF buffer.
+/// Polls shm for new frames and converts BGRA→RGBA into an external buffer.
+/// Does NOT own display output — that's the Compositor's job via Regions.
 pub struct Viewport {
     buffer_id: i32,
     notify: shm::FrameNotify,
     shm_pair: ShmPair,
-    rgba_buf: Vec<u8>,
-    display_file: std::fs::File,
-    display_path: String,
-    path_b64: String,
-    rect: Rect,
-    image_id: u32,
     frame_width: u32,
     frame_height: u32,
     pending_rects: Vec<[u32; 4]>,
@@ -74,47 +66,33 @@ pub struct Viewport {
 
 impl Viewport {
     /// Create a new viewport for a buffer. Opens shm segments.
-    pub fn new(buffer_id: i32, rect: Rect, image_id: u32) -> anyhow::Result<Self> {
+    /// No display file, no image_id — rendering is the Compositor's job.
+    pub fn new(buffer_id: i32, width: u32, height: u32) -> anyhow::Result<Self> {
         let notify_name = format!("/dirtferret-{}-notify", buffer_id);
         let notify = shm::FrameNotify::open(&notify_name)?;
-        let shm_pair = ShmPair::open(buffer_id, rect.width, rect.height)?;
-
-        let size = (rect.width as usize) * (rect.height as usize) * 4;
-        let display_path = format!("/dev/shm/dirtferret-display-{}", image_id);
-        let f = std::fs::File::create(&display_path)?;
-        f.set_len(size as u64)?;
-        let path_b64 = base64::engine::general_purpose::STANDARD
-            .encode(display_path.as_bytes());
+        let shm_pair = ShmPair::open(buffer_id, width, height)?;
 
         Ok(Viewport {
             buffer_id,
             notify,
             shm_pair,
-            rgba_buf: vec![0u8; size],
-            display_file: f,
-            display_path,
-            path_b64,
-            rect,
-            image_id,
-            frame_width: rect.width,
-            frame_height: rect.height,
+            frame_width: width,
+            frame_height: height,
             pending_rects: Vec::new(),
             full_redraw: true,
         })
     }
 
-    /// Poll for a new frame and render if available.
-    /// Returns true if a frame was rendered.
-    pub fn poll_and_render(&mut self, stdout: &mut impl Write) -> anyhow::Result<bool> {
+    /// Poll for a new frame and convert BGRA→RGBA into the caller's buffer.
+    /// Returns true if new pixel data was written to `target`.
+    /// The `target` slice is owned by a Region — zero copy into the compositor.
+    pub fn poll_and_convert(&mut self, target: &mut [u8]) -> anyhow::Result<bool> {
         let header = self.notify.poll();
 
         if let Some(ref header) = header {
             let new_size = (header.width as usize) * (header.height as usize) * 4;
             if new_size != self.shm_pair.size {
                 self.shm_pair = ShmPair::open(self.buffer_id, header.width, header.height)?;
-                self.rgba_buf.resize(new_size, 0);
-                self.display_file = std::fs::File::create(&self.display_path)?;
-                self.display_file.set_len(new_size as u64)?;
                 self.full_redraw = true;
             }
             self.frame_width = header.width;
@@ -134,7 +112,7 @@ impl Viewport {
 
         if self.full_redraw || self.pending_rects.is_empty() {
             convert_rect_bgra_to_rgba(
-                src, &mut self.rgba_buf,
+                src, target,
                 self.frame_width, 0, 0, self.frame_width, self.frame_height,
             );
             self.full_redraw = false;
@@ -142,32 +120,19 @@ impl Viewport {
             for rect in &self.pending_rects {
                 let [x, y, w, h] = *rect;
                 convert_rect_bgra_to_rgba(
-                    src, &mut self.rgba_buf,
+                    src, target,
                     self.frame_width, x, y, w, h,
                 );
             }
         }
         self.pending_rects.clear();
 
-        self.display_file.seek(SeekFrom::Start(0))?;
-        self.display_file.write_all(&self.rgba_buf)?;
-
-        // Position at viewport origin and display
-        let row = self.rect.y / 16 + 1;
-        let col = self.rect.x / 8 + 1;
-        write!(
-            stdout,
-            "\x1b[{};{}H\x1b_Ga=T,t=f,f=32,s={},v={},i={},C=1,q=2;{}\x1b\\",
-            row, col, self.frame_width, self.frame_height, self.image_id, self.path_b64
-        )?;
-
         Ok(true)
     }
 
-    /// Update the screen area this viewport occupies.
-    pub fn set_rect(&mut self, rect: Rect) {
-        self.rect = rect;
-        self.full_redraw = true;
+    /// Returns (frame_width, frame_height) in pixels.
+    pub fn frame_dims(&self) -> (u32, u32) {
+        (self.frame_width, self.frame_height)
     }
 
     /// Force a full redraw on next poll.
@@ -177,20 +142,6 @@ impl Viewport {
 
     pub fn buffer_id(&self) -> i32 {
         self.buffer_id
-    }
-
-    pub fn frame_width(&self) -> u32 {
-        self.frame_width
-    }
-
-    pub fn frame_height(&self) -> u32 {
-        self.frame_height
-    }
-}
-
-impl Drop for Viewport {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.display_path);
     }
 }
 

@@ -4,6 +4,9 @@ mod mux;
 mod ui;
 mod shm;
 mod viewport;
+mod region;
+mod layout;
+mod compositor;
 
 pub mod core_capnp {
     include!(concat!(env!("OUT_DIR"), "/core_capnp.rs"));
@@ -18,9 +21,6 @@ use futures_util::{AsyncReadExt, StreamExt};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::time::{Duration, Instant};
-use base64::Engine as _;
-
-const IMAGE_ID: u32 = 1;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -38,6 +38,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_test() -> anyhow::Result<()> {
+    use base64::Engine as _;
     let mut stdout = std::io::stdout();
     let tiny: [u8; 16] = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
     let tiny_b64 = base64::engine::general_purpose::STANDARD.encode(&tiny);
@@ -61,7 +62,7 @@ fn run_test_loop() -> anyhow::Result<()> {
     stdout.flush()?;
     let pattern = viewport::test_pattern(200, 200);
     loop {
-        let escape = viewport::kitty_display_direct(&pattern, 200, 200, IMAGE_ID);
+        let escape = viewport::kitty_display_direct(&pattern, 200, 200, 1);
         write!(stdout, "\x1b[H")?;
         stdout.write_all(&escape)?;
         stdout.flush()?;
@@ -229,25 +230,32 @@ async fn async_main() -> anyhow::Result<()> {
     let core: core_capnp::core::Client = rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
     tokio::task::spawn_local(rpc_system);
 
-    // --- RPC callbacks via channel ---
-    let (mux_tx, mut mux_rx) = tokio::sync::mpsc::channel::<MuxEvent>(16);
-    let ui_impl = UiImpl { mux_tx };
-    let ui_client: core_capnp::ui::Client = capnp_rpc::new_client(ui_impl);
-
-    let mut req = core.attach_ui_request();
-    req.get().set_ui(ui_client);
-    req.get().set_width(pw);
-    req.get().set_height(ph);
-    req.send().promise.await?;
-
-    // Wait for initial buffer creation
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
     // --- Initialize components ---
     let mut mux_state = mux::Mux::new();
     let mut ui_state = ui::Ui::new();
     let mut current_mode = mode::MODE_NORMAL.to_string();
     let mut current_url = String::new();
+
+    // --- Compositor: region-based rendering ---
+    // Created before attachUi so we know the viewport dimensions to send to core.
+    let mut compositor = compositor::Compositor::new(pw, ph, cols, rows)?;
+    compositor.invalidate_chrome(&ui_state);
+    let (vp_w, vp_h) = compositor.viewport_dims();
+
+    // --- RPC callbacks via channel ---
+    let (mux_tx, mut mux_rx) = tokio::sync::mpsc::channel::<MuxEvent>(16);
+    let ui_impl = UiImpl { mux_tx };
+    let ui_client: core_capnp::ui::Client = capnp_rpc::new_client(ui_impl);
+
+    // Tell core the viewport dimensions (not full terminal — chrome takes some rows).
+    let mut req = core.attach_ui_request();
+    req.get().set_ui(ui_client);
+    req.get().set_width(vp_w);
+    req.get().set_height(vp_h);
+    req.send().promise.await?;
+
+    // Wait for initial buffer creation
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Drain buffered mux events
     while let Ok(event) = mux_rx.try_recv() {
@@ -263,24 +271,15 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
-    // Compute viewport rect (total area minus chrome)
-    let vp_rect = ui_state.viewport_rect(cols, rows, pw, ph);
-
-    // Create viewport for active buffer
+    // Create viewport for active buffer at viewport dimensions
     let active_id = mux_state.active_buffer_id().unwrap_or(1);
-    let mut active_viewport = match viewport::Viewport::new(active_id, vp_rect, IMAGE_ID) {
+    let mut active_viewport = match viewport::Viewport::new(active_id, vp_w, vp_h) {
         Ok(vp) => Some(vp),
         Err(e) => {
             eprintln!("[tui] Failed to create viewport: {}", e);
             None
         }
     };
-
-    // NOTE: CEF renders at full terminal size (pw x ph from attachUi).
-    // The viewport rect is smaller (minus chrome rows), but we do NOT
-    // send a resize here — FramePool::resize() destroys and recreates
-    // shm segments, orphaning the TUI's cached mmaps.
-    // Chrome rendering is handled separately (see below).
 
     // --- Terminal setup ---
     crossterm::terminal::enable_raw_mode()?;
@@ -291,10 +290,6 @@ async fn async_main() -> anyhow::Result<()> {
         crossterm::cursor::Hide,
         crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
     )?;
-
-    // ratatui on stderr (stdout is for kitty graphics)
-    let backend = ratatui::backend::CrosstermBackend::new(std::io::stderr());
-    let mut terminal = ratatui::Terminal::new(backend)?;
 
     // --- Event loop state ---
     let mut events = EventStream::new();
@@ -311,8 +306,14 @@ async fn async_main() -> anyhow::Result<()> {
         tokio::select! {
             // --- Render tick ---
             _ = render_interval.tick() => {
+                // Update UI state for chrome
+                ui_state.set_fps(frame_times.len());
+                ui_state.set_url(&current_url);
+                let tab_titles: Vec<String> = mux_state.tabs().iter().map(|t| t.title.clone()).collect();
+                ui_state.set_tabs(tab_titles, mux_state.active_index());
+
                 if let Some(ref mut vp) = active_viewport {
-                    match vp.poll_and_render(&mut stdout) {
+                    match compositor.render_tick(vp, &ui_state, &mut stdout) {
                         Ok(true) => {
                             total_frames += 1;
                             let now = Instant::now();
@@ -325,16 +326,6 @@ async fn async_main() -> anyhow::Result<()> {
                         Err(e) => { eprintln!("[tui] Render error: {}", e); }
                     }
                 }
-
-                // Update UI state
-                ui_state.set_fps(frame_times.len());
-                ui_state.set_url(&current_url);
-                let tab_titles: Vec<String> = mux_state.tabs().iter().map(|t| t.title.clone()).collect();
-                ui_state.set_tabs(tab_titles, mux_state.active_index());
-
-                // Draw chrome
-                terminal.draw(|frame| { ui_state.render(frame); })?;
-                stdout.flush()?;
             }
 
             // --- Mux events from RPC callbacks ---
@@ -362,6 +353,7 @@ async fn async_main() -> anyhow::Result<()> {
                             mode::Action::SwitchMode(new_mode) => {
                                 current_mode = new_mode;
                                 ui_state.set_mode(&current_mode);
+                                compositor.invalidate_chrome(&ui_state);
                             }
                             mode::Action::Execute(name, arg) => {
                                 let buf_id = mux_state.active_buffer_id().unwrap_or(1);
@@ -393,6 +385,7 @@ async fn async_main() -> anyhow::Result<()> {
                                             let new_mode = &action_str["switch-mode:".len()..];
                                             current_mode = new_mode.to_string();
                                             ui_state.set_mode(&current_mode);
+                                            compositor.invalidate_chrome(&ui_state);
                                         } else if dispatch_action(action_str, arg_str, buf_id, &core, &mut mux_state) {
                                             break; // quit
                                         }
@@ -473,16 +466,30 @@ async fn async_main() -> anyhow::Result<()> {
 
                     Event::Resize(new_cols, new_rows) => {
                         if let Ok((new_pw, new_ph)) = input::viewport_pixel_size() {
-                            let vp_rect = ui_state.viewport_rect(new_cols, new_rows, new_pw, new_ph);
-                            if let Some(ref mut vp) = active_viewport {
-                                vp.set_rect(vp_rect);
-                            }
+                            // Resize compositor layout
+                            compositor.resize(new_pw, new_ph, new_cols, new_rows)?;
+                            compositor.invalidate_chrome(&ui_state);
+
+                            // Tell core about new viewport dimensions
+                            let (vp_w, vp_h) = compositor.viewport_dims();
                             let buf_id = mux_state.active_buffer_id().unwrap_or(1);
                             let mut req = core.resize_request();
                             req.get().set_buffer_id(buf_id);
-                            req.get().set_width(vp_rect.width);
-                            req.get().set_height(vp_rect.height);
+                            req.get().set_width(vp_w);
+                            req.get().set_height(vp_h);
                             let _ = req.send().promise.await;
+
+                            // Recreate viewport with fresh shm mmaps after
+                            // core has had time to recreate FramePool segments
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            let (vp_w, vp_h) = compositor.viewport_dims();
+                            active_viewport = match viewport::Viewport::new(buf_id, vp_w, vp_h) {
+                                Ok(vp) => Some(vp),
+                                Err(e) => {
+                                    eprintln!("[tui] Failed to recreate viewport: {}", e);
+                                    None
+                                }
+                            };
                         }
                     }
                     _ => {}
@@ -504,8 +511,7 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // --- Cleanup ---
-    write!(stdout, "\x1b_Ga=d,d=a\x1b\\")?;
-    stdout.flush()?;
+    compositor.cleanup(&mut stdout)?;
     drop(active_viewport);
     crossterm::execute!(
         stdout,
