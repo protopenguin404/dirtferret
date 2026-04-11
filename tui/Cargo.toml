@@ -6,7 +6,6 @@ description = "Terminal frontend for dirtferret browser"
 
 [dependencies]
 # Terminal UI
-ratatui = { version = "0.29", features = ["crossterm"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 base64 = "0.22.1"
 
