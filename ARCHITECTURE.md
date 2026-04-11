@@ -136,6 +136,37 @@ Terminal (kitty/WezTerm/Ghostty): renders pixels
 
 **Inactive buffers:** `CefBrowserHost::WasHidden(true)` stops `OnPaint` for hidden buffers (tabs not currently displayed), saving GPU and bandwidth.
 
+## Buffer Viewport: The Rendering Primitive
+
+The buffer viewport is the atomic rendering unit in the TUI. It handles exactly one concern: displaying a single CEF buffer's pixels and forwarding input to it. It is completely independent of the surrounding UI (tab bars, status lines, splits, command mode).
+
+**What a buffer viewport owns:**
+- An shm reader for one buffer's frame pool
+- BGRA→RGBA conversion
+- Kitty graphics output for its region
+- Keyboard/mouse passthrough to the core for its buffer ID
+- Resize notification to the core when its area changes
+
+**What a buffer viewport does NOT know about:**
+- Modal input (normal/insert/command) — the UI layer gates what reaches the viewport
+- Tab bars, status lines, splits — the UI layer positions the viewport in a `Rect`
+- Other buffers — each viewport is independent
+
+This separation means the UI layer is a pure composition concern: it decides which viewports exist, where they go, and which input they receive. The viewport itself is a self-contained pixel pipe that can be tested and developed independently.
+
+```
+UI Layer (app.rs, layout.rs)
+  ├── Decides layout: tab bar, status, splits
+  ├── Routes input: mode machine decides what goes where
+  └── Owns N buffer viewports, each in a Rect
+        │
+        ▼
+Buffer Viewport (viewport.rs, shm.rs)
+  ├── Reads shm for one buffer
+  ├── Converts + displays via kitty
+  └── Forwards input for one buffer
+```
+
 ## Buffer / Window / Tab Model
 
 Following Neovim's triad:

@@ -1,288 +1,317 @@
-mod app;
-mod layout;
 mod shm;
 mod viewport;
 
-mod core_capnp {
+pub mod core_capnp {
     include!(concat!(env!("OUT_DIR"), "/core_capnp.rs"));
 }
-mod types_capnp {
+pub mod types_capnp {
     include!(concat!(env!("OUT_DIR"), "/types_capnp.rs"));
 }
 
-use app::{Action, App, FrameData};
-use shm::ShmReader;
+use base64::Engine as _;
+use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
+use futures_util::{AsyncReadExt, StreamExt};
+use std::collections::VecDeque;
+use std::io::{Seek, SeekFrom, Write};
+use std::time::{Duration, Instant};
 
-use std::io::Write;
-use std::time::Duration;
+const IMAGE_ID: u32 = 1;
+const DISPLAY_PATH: &str = "/dev/shm/dirtferret-display";
 
-use capnp_rpc::{rpc_twoparty_capnp, twoparty};
-use crossterm::event::{Event, EventStream};
-use futures_util::io::AsyncReadExt;
-use futures_util::StreamExt;
-use ratatui::prelude::*;
-use tokio_util::compat::TokioAsyncReadCompatExt;
+fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
 
-// Frame notification from core -> main loop
-struct FrameNotification {
-    shm_name: String,
-    width: u32,
-    height: u32,
+    if args.iter().any(|a| a == "--test") {
+        return run_test();
+    }
+    if args.iter().any(|a| a == "--test-loop") {
+        return run_test_loop();
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, async_main())
 }
 
-enum StateUpdate {
-    Title {
-        buffer_id: i32,
-        title: String,
-    },
-    Url {
-        buffer_id: i32,
-        url: String,
-    },
-    Loading {
-        buffer_id: i32,
-        loading: bool,
-        can_go_back: bool,
-        can_go_forward: bool,
-    },
-    Progress {
-        buffer_id: i32,
-        progress: f64,
-    },
-    BufferCreated {
-        id: i32,
-        url: String,
-        title: String,
-    },
-    BufferClosed {
-        buffer_id: i32,
-    },
+fn run_test() -> anyhow::Result<()> {
+    let mut stdout = std::io::stdout();
+    let tiny: [u8; 16] = [
+        255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+    ];
+    let tiny_b64 = base64::engine::general_purpose::STANDARD.encode(&tiny);
+    let esc = format!("\x1b_Ga=T,t=d,f=32,s=2,v=2,i=1;{}\x1b\\", tiny_b64);
+    write!(stdout, "\x1b[H")?;
+    stdout.write_all(esc.as_bytes())?;
+    write!(stdout, "\n\n")?;
+
+    let pattern = viewport::test_pattern(100, 100);
+    let escape = viewport::kitty_display_direct(&pattern, 100, 100, 2);
+    stdout.write_all(&escape)?;
+    write!(stdout, "\n\n")?;
+
+    let escape_file = viewport::kitty_display_file(&pattern, 100, 100, 3)?;
+    stdout.write_all(&escape_file)?;
+    write!(stdout, "\n\n")?;
+    stdout.flush()?;
+
+    eprintln!("[test] Press Enter to exit.");
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf)?;
+    Ok(())
 }
 
-// Ui callback implementation - receives RPC calls from core
-struct UiImpl {
-    frame_tx: tokio::sync::mpsc::Sender<FrameNotification>,
-    state_tx: tokio::sync::mpsc::Sender<StateUpdate>,
+fn run_test_loop() -> anyhow::Result<()> {
+    let mut stdout = std::io::stdout();
+    write!(stdout, "\x1b[?25l\x1b[2J\x1b[H")?;
+    stdout.flush()?;
+    let pattern = viewport::test_pattern(200, 200);
+    let mut frame: u64 = 0;
+    loop {
+        frame += 1;
+        let escape = viewport::kitty_display_direct(&pattern, 200, 200, IMAGE_ID);
+        write!(stdout, "\x1b[H")?;
+        stdout.write_all(&escape)?;
+        stdout.flush()?;
+        eprintln!("[test-loop] Frame {}", frame);
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
+
+// --- Ui RPC callback (stubs — frame delivery is via shm polling) ---
+
+struct UiImpl;
 
 impl core_capnp::ui::Server for UiImpl {
     fn on_frame(
         &mut self,
-        params: core_capnp::ui::OnFrameParams,
-        _results: core_capnp::ui::OnFrameResults,
+        _: core_capnp::ui::OnFrameParams,
+        _: core_capnp::ui::OnFrameResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        let Ok(params) = params.get() else {
-            return capnp::capability::Promise::ok(());
-        };
-        let shm_name = match params.get_shm_name() {
-            Ok(s) => match s.to_string() {
-                Ok(s) => s,
-                Err(_) => return capnp::capability::Promise::ok(()),
-            },
-            Err(_) => return capnp::capability::Promise::ok(()),
-        };
-        let width = params.get_width();
-        let height = params.get_height();
-
-        let _ = self.frame_tx.try_send(FrameNotification {
-            shm_name,
-            width,
-            height,
-        });
-        capnp::capability::Promise::ok(())
-    }
-
-    fn on_title_changed(
-        &mut self,
-        params: core_capnp::ui::OnTitleChangedParams,
-        _results: core_capnp::ui::OnTitleChangedResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        if let Ok(p) = params.get() {
-            if let Ok(title) = p.get_title() {
-                if let Ok(title) = title.to_string() {
-                    let _ = self.state_tx.try_send(StateUpdate::Title {
-                        buffer_id: p.get_buffer_id(),
-                        title,
-                    });
-                }
-            }
-        }
-        capnp::capability::Promise::ok(())
-    }
-
-    fn on_url_changed(
-        &mut self,
-        params: core_capnp::ui::OnUrlChangedParams,
-        _results: core_capnp::ui::OnUrlChangedResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        if let Ok(p) = params.get() {
-            if let Ok(url) = p.get_url() {
-                if let Ok(url) = url.to_string() {
-                    let _ = self.state_tx.try_send(StateUpdate::Url {
-                        buffer_id: p.get_buffer_id(),
-                        url,
-                    });
-                }
-            }
-        }
-        capnp::capability::Promise::ok(())
-    }
-
-    fn on_loading_state_changed(
-        &mut self,
-        params: core_capnp::ui::OnLoadingStateChangedParams,
-        _results: core_capnp::ui::OnLoadingStateChangedResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        if let Ok(p) = params.get() {
-            let _ = self.state_tx.try_send(StateUpdate::Loading {
-                buffer_id: p.get_buffer_id(),
-                loading: p.get_loading(),
-                can_go_back: p.get_can_go_back(),
-                can_go_forward: p.get_can_go_forward(),
-            });
-        }
-        capnp::capability::Promise::ok(())
-    }
-
-    fn on_load_progress(
-        &mut self,
-        params: core_capnp::ui::OnLoadProgressParams,
-        _results: core_capnp::ui::OnLoadProgressResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        if let Ok(p) = params.get() {
-            let _ = self.state_tx.try_send(StateUpdate::Progress {
-                buffer_id: p.get_buffer_id(),
-                progress: p.get_progress(),
-            });
-        }
         capnp::capability::Promise::ok(())
     }
 
     fn on_buffer_created(
         &mut self,
-        params: core_capnp::ui::OnBufferCreatedParams,
-        _results: core_capnp::ui::OnBufferCreatedResults,
+        _: core_capnp::ui::OnBufferCreatedParams,
+        _: core_capnp::ui::OnBufferCreatedResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        if let Ok(p) = params.get() {
-            if let Ok(info) = p.get_info() {
-                let url = info
-                    .get_url()
-                    .ok()
-                    .and_then(|s| s.to_string().ok())
-                    .unwrap_or_default();
-                let title = info
-                    .get_title()
-                    .ok()
-                    .and_then(|s| s.to_string().ok())
-                    .unwrap_or_default();
-                let _ = self.state_tx.try_send(StateUpdate::BufferCreated {
-                    id: info.get_id(),
-                    url,
-                    title,
-                });
-            }
-        }
         capnp::capability::Promise::ok(())
     }
-
     fn on_buffer_closed(
         &mut self,
-        params: core_capnp::ui::OnBufferClosedParams,
-        _results: core_capnp::ui::OnBufferClosedResults,
+        _: core_capnp::ui::OnBufferClosedParams,
+        _: core_capnp::ui::OnBufferClosedResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        if let Ok(p) = params.get() {
-            let _ = self.state_tx.try_send(StateUpdate::BufferClosed {
-                buffer_id: p.get_buffer_id(),
-            });
-        }
         capnp::capability::Promise::ok(())
     }
-
+    fn on_title_changed(
+        &mut self,
+        _: core_capnp::ui::OnTitleChangedParams,
+        _: core_capnp::ui::OnTitleChangedResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        capnp::capability::Promise::ok(())
+    }
+    fn on_url_changed(
+        &mut self,
+        _: core_capnp::ui::OnUrlChangedParams,
+        _: core_capnp::ui::OnUrlChangedResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        capnp::capability::Promise::ok(())
+    }
+    fn on_loading_state_changed(
+        &mut self,
+        _: core_capnp::ui::OnLoadingStateChangedParams,
+        _: core_capnp::ui::OnLoadingStateChangedResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        capnp::capability::Promise::ok(())
+    }
+    fn on_load_progress(
+        &mut self,
+        _: core_capnp::ui::OnLoadProgressParams,
+        _: core_capnp::ui::OnLoadProgressResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        capnp::capability::Promise::ok(())
+    }
     fn on_focused_field_changed(
         &mut self,
-        _params: core_capnp::ui::OnFocusedFieldChangedParams,
-        _results: core_capnp::ui::OnFocusedFieldChangedResults,
+        _: core_capnp::ui::OnFocusedFieldChangedParams,
+        _: core_capnp::ui::OnFocusedFieldChangedResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         capnp::capability::Promise::ok(())
     }
-
     fn on_cursor_changed(
         &mut self,
-        _params: core_capnp::ui::OnCursorChangedParams,
-        _results: core_capnp::ui::OnCursorChangedResults,
+        _: core_capnp::ui::OnCursorChangedParams,
+        _: core_capnp::ui::OnCursorChangedResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         capnp::capability::Promise::ok(())
     }
-
     fn on_console_message(
         &mut self,
-        _params: core_capnp::ui::OnConsoleMessageParams,
-        _results: core_capnp::ui::OnConsoleMessageResults,
+        _: core_capnp::ui::OnConsoleMessageParams,
+        _: core_capnp::ui::OnConsoleMessageResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         capnp::capability::Promise::ok(())
     }
+}
+
+// --- Input translation ---
+
+fn key_to_cef(code: KeyCode, modifiers: KeyModifiers) -> (u32, u32) {
+    let character = match code {
+        KeyCode::Char(c) => c as u32,
+        KeyCode::Enter => '\r' as u32,
+        KeyCode::Tab => '\t' as u32,
+        KeyCode::Backspace => 0x08,
+        KeyCode::Delete => 0x2E,
+        KeyCode::Left => 0x25,
+        KeyCode::Right => 0x27,
+        KeyCode::Up => 0x26,
+        KeyCode::Down => 0x28,
+        KeyCode::Home => 0x24,
+        KeyCode::End => 0x23,
+        KeyCode::PageUp => 0x21,
+        KeyCode::PageDown => 0x22,
+        KeyCode::Esc => 0x1B,
+        _ => 0,
+    };
+    let mut mods: u32 = 0;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        mods |= 1;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        mods |= 2;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        mods |= 4;
+    }
+    (character, mods)
+}
+
+fn mouse_mods_to_cef(modifiers: KeyModifiers) -> u32 {
+    let mut mods: u32 = 0;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        mods |= 1;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        mods |= 2;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        mods |= 4;
+    }
+    mods
+}
+
+fn cell_to_pixel(col: u16, row: u16) -> (i32, i32) {
+    let Ok(win) = crossterm::terminal::window_size() else {
+        return (col as i32 * 8, row as i32 * 16);
+    };
+    if win.columns == 0 || win.rows == 0 {
+        return (col as i32 * 8, row as i32 * 16);
+    }
+    let cell_w = win.width as f64 / win.columns as f64;
+    let cell_h = win.height as f64 / win.rows as f64;
+    ((col as f64 * cell_w) as i32, (row as f64 * cell_h) as i32)
 }
 
 fn viewport_pixel_size() -> anyhow::Result<(u32, u32)> {
     let win = crossterm::terminal::window_size()?;
-
-    // If the terminal reports pixel dimensions, use them directly.
-    // Otherwise fall back to assuming 8x16 cells (common monospace).
-    let (pw, ph) = if win.width > 0 && win.height > 0 {
-        let viewport_rows = win.rows.saturating_sub(3); // 3 rows chrome
-        let cell_h = win.height / win.rows.max(1);
-        (win.width as u32, viewport_rows as u32 * cell_h as u32)
+    if win.width > 0 && win.height > 0 {
+        Ok((win.width as u32, win.height as u32))
     } else {
-        let viewport_rows = win.rows.saturating_sub(3);
-        (win.columns as u32 * 8, viewport_rows as u32 * 16)
-    };
-
-    Ok((pw.max(1), ph.max(1)))
+        Ok((win.columns as u32 * 8, win.rows as u32 * 16))
+    }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async move {
-            if let Err(e) = run().await {
-                // Restore terminal before printing error
-                let _ = crossterm::terminal::disable_raw_mode();
-                let _ = crossterm::execute!(
-                    std::io::stdout(),
-                    crossterm::terminal::LeaveAlternateScreen
-                );
-                eprintln!("Error: {e:#}");
-                std::process::exit(1);
-            }
+// --- BGRA→RGBA conversion for a sub-rectangle ---
+
+fn convert_rect_bgra_to_rgba(
+    src: &[u8],
+    dst: &mut [u8],
+    stride: u32,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) {
+    let stride = stride as usize * 4;
+    let x = x as usize;
+    let w = w as usize;
+    for row in y as usize..(y + h) as usize {
+        let offset = row * stride + x * 4;
+        let end = offset + w * 4;
+        if end > src.len() || end > dst.len() {
+            break;
+        }
+        let src_row = &src[offset..end];
+        let dst_row = &mut dst[offset..end];
+        for chunk in 0..w {
+            let i = chunk * 4;
+            dst_row[i] = src_row[i + 2]; // R ← B
+            dst_row[i + 1] = src_row[i + 1]; // G
+            dst_row[i + 2] = src_row[i]; // B ← R
+            dst_row[i + 3] = src_row[i + 3]; // A
+        }
+    }
+}
+
+// --- Cached shm state: both buffers mapped, switch by name ---
+
+struct ShmPair {
+    reader_0: shm::ShmReader,
+    reader_1: shm::ShmReader,
+    buffer_id: i32,
+    size: usize,
+}
+
+impl ShmPair {
+    fn open(buffer_id: i32, width: u32, height: u32) -> anyhow::Result<Self> {
+        let size = (width as usize) * (height as usize) * 4;
+        let name_0 = format!("/dirtferret-{}-frame-0", buffer_id);
+        let name_1 = format!("/dirtferret-{}-frame-1", buffer_id);
+        Ok(Self {
+            reader_0: shm::ShmReader::open(&name_0, size)?,
+            reader_1: shm::ShmReader::open(&name_1, size)?,
+            buffer_id,
+            size,
         })
-        .await;
-    Ok(())
+    }
+
+    fn reader_by_slot(&self, slot: u32) -> &shm::ShmReader {
+        if slot == 0 {
+            &self.reader_0
+        } else {
+            &self.reader_1
+        }
+    }
 }
 
-async fn run() -> anyhow::Result<()> {
-    // Connect to core via RPC
-    let stream = tokio::net::TcpStream::connect("127.0.0.1:5000").await?;
-    let (reader, writer) = TokioAsyncReadCompatExt::compat(stream).split();
+// --- Main ---
 
+async fn async_main() -> anyhow::Result<()> {
+    let (pw, ph) = viewport_pixel_size()?;
+    eprintln!("[tui] Terminal viewport: {}x{} pixels", pw, ph);
+
+    // --- RPC ---
+    let stream = tokio::net::TcpStream::connect("127.0.0.1:5000").await?;
+    stream.set_nodelay(true)?;
+    let (reader, writer) = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream).split();
     let rpc_network = Box::new(twoparty::VatNetwork::new(
-        reader,
-        writer,
+        futures_util::io::BufReader::new(reader),
+        futures_util::io::BufWriter::new(writer),
         rpc_twoparty_capnp::Side::Client,
         Default::default(),
     ));
-    let mut rpc_system = capnp_rpc::RpcSystem::new(rpc_network, None);
+    let mut rpc_system = RpcSystem::new(rpc_network, None);
     let core: core_capnp::core::Client = rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
-
     tokio::task::spawn_local(rpc_system);
 
-    // Frame notification channel
-    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<FrameNotification>(4);
-    let (state_tx, mut state_rx) = tokio::sync::mpsc::channel::<StateUpdate>(32);
-
-    // Attach UI to core
-    let (pw, ph) = viewport_pixel_size()?;
-    let ui_impl = UiImpl { frame_tx, state_tx };
+    let ui_impl = UiImpl;
     let ui_client: core_capnp::ui::Client = capnp_rpc::new_client(ui_impl);
 
     let mut req = core.attach_ui_request();
@@ -291,245 +320,297 @@ async fn run() -> anyhow::Result<()> {
     req.get().set_height(ph);
     req.send().promise.await?;
 
-    // Setup terminal
-    crossterm::terminal::enable_raw_mode()?;
-    crossterm::execute!(
-        std::io::stdout(),
-        crossterm::terminal::EnterAlternateScreen,
-        crossterm::cursor::Hide
-    )?;
-    let backend = CrosstermBackend::new(std::io::stdout());
-    let mut terminal = ratatui::Terminal::new(backend)?;
+    // --- Render state ---
+    let mut shm_pair: Option<ShmPair> = None;
+    let mut frame_notify: Option<shm::FrameNotify> = None;
+    let mut rgba_buf: Vec<u8> = Vec::new();
+    let mut display_file: Option<std::fs::File> = None;
+    let mut frame_width: u32 = pw;
+    let mut frame_height: u32 = ph;
+    let mut active_buffer_id: i32 = 1;
+    let mut pending_rects: Vec<[u32; 4]> = Vec::new();
+    let mut full_redraw = true;
 
-    let mut app = App::new();
+    // Wait briefly for the core to create the initial buffer and its shm segments.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Open the notify header for buffer 1
+    let notify_name = format!("/dirtferret-{}-notify", active_buffer_id);
+    frame_notify = match shm::FrameNotify::open(&notify_name) {
+        Ok(n) => {
+            eprintln!("[tui] Opened notify shm: {}", notify_name);
+            Some(n)
+        }
+        Err(e) => {
+            eprintln!(
+                "[tui] Failed to open notify shm {}: {} (will retry on buffer event)",
+                notify_name, e
+            );
+            None
+        }
+    };
+
+    // Also open the frame pair
+    match ShmPair::open(active_buffer_id, pw, ph) {
+        Ok(pair) => {
+            let size = (pw as usize) * (ph as usize) * 4;
+            rgba_buf.resize(size, 0);
+            let f = std::fs::File::create(DISPLAY_PATH)?;
+            f.set_len(size as u64)?;
+            display_file = Some(f);
+            shm_pair = Some(pair);
+            full_redraw = true;
+        }
+        Err(e) => {
+            eprintln!(
+                "[tui] Failed to open frame shm: {} (will retry on first frame)",
+                e
+            );
+        }
+    }
+
+    // --- Terminal setup ---
+    crossterm::terminal::enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    crossterm::execute!(
+        stdout,
+        crossterm::event::EnableMouseCapture,
+        crossterm::cursor::Hide,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+    )?;
+    write!(stdout, "\x1b[H")?;
+    stdout.flush()?;
+
+    // Precompute the kitty escape (path never changes, only dims do)
+    let path_b64 = base64::engine::general_purpose::STANDARD.encode(DISPLAY_PATH.as_bytes());
+
     let mut events = EventStream::new();
-    let mut render_interval = tokio::time::interval(Duration::from_millis(200));
+    let mut render_interval = tokio::time::interval(Duration::from_millis(5));
     render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut current_shm: Option<ShmReader> = None;
-    let mut dirty = true; // need ratatui chrome redraw
-    let mut frame_dirty = false; // need kitty image update
+
+    // --- FPS tracking ---
+    let mut show_fps = false;
+    let mut frame_times: VecDeque<Instant> = VecDeque::with_capacity(64);
+    let mut total_frames: u64 = 0;
+    let session_start = Instant::now();
 
     loop {
         tokio::select! {
+            // --- Render tick: poll shm notify for new frames ---
             _ = render_interval.tick() => {
-                if !dirty && !frame_dirty {
+                let header = frame_notify.as_mut().and_then(|n| n.poll());
+
+                if let Some(header) = &header {
+                    let new_size = (header.width as usize) * (header.height as usize) * 4;
+
+                    let need_reopen = match &shm_pair {
+                        Some(p) => p.size != new_size,
+                        None => true,
+                    };
+                    if need_reopen {
+                        shm_pair = Some(ShmPair::open(
+                            active_buffer_id, header.width, header.height,
+                        )?);
+                        rgba_buf.resize(new_size, 0);
+                        let f = std::fs::File::create(DISPLAY_PATH)?;
+                        f.set_len(new_size as u64)?;
+                        display_file = Some(f);
+                        full_redraw = true;
+                    }
+
+                    frame_width = header.width;
+                    frame_height = header.height;
+
+                    if !full_redraw {
+                        pending_rects.extend_from_slice(&header.dirty_rects);
+                    }
+                }
+
+                if header.is_none() && !full_redraw {
                     continue;
                 }
 
-                let mut viewport_area = Rect::default();
-                terminal.draw(|f| app::render(f, &app, &mut viewport_area))?;
-                dirty = false;
+                if let Some(ref pair) = shm_pair {
+                    let slot = header.as_ref().map(|h| h.read_slot).unwrap_or(0);
+                    let reader = pair.reader_by_slot(slot);
+                    let src = reader.as_bytes();
 
-                // Only re-send kitty image when frame pixels actually changed
-                if frame_dirty {
-                    if let Some(ref shm) = current_shm {
-                        if let Some(ref frame_data) = app.frame {
-                            let mut pixels = shm.as_bytes().to_vec();
-                            viewport::bgra_to_rgba(&mut pixels);
-
-                            // File-based transfer: write RGBA to tmpfs, kitty reads
-                            // from file. Sends ~100 bytes instead of ~17MB base64.
-                            let escape = viewport::kitty_display_file(
-                                &pixels, frame_data.width, frame_data.height, 1,
-                            )?;
-
-                            let mut stdout = std::io::stdout().lock();
-                            write!(stdout, "\x1b[{};{}H",
-                                   viewport_area.y + 1, viewport_area.x + 1)?;
-                            stdout.write_all(&escape)?;
-                            stdout.flush()?;
+                    if full_redraw || pending_rects.is_empty() {
+                        convert_rect_bgra_to_rgba(
+                            src, &mut rgba_buf,
+                            frame_width, 0, 0, frame_width, frame_height,
+                        );
+                        full_redraw = false;
+                    } else {
+                        for rect in &pending_rects {
+                            let [x, y, w, h] = *rect;
+                            convert_rect_bgra_to_rgba(
+                                src, &mut rgba_buf,
+                                frame_width, x, y, w, h,
+                            );
                         }
                     }
-                    frame_dirty = false;
+                    pending_rects.clear();
+
+                    if let Some(ref mut f) = display_file {
+                        f.seek(SeekFrom::Start(0))?;
+                        f.write_all(&rgba_buf)?;
+                    }
+
+                    write!(
+                        stdout,
+                        "\x1b[H\x1b_Ga=T,t=f,f=32,s={},v={},i={},C=1,q=2;{}\x1b\\",
+                        frame_width, frame_height, IMAGE_ID, path_b64
+                    )?;
+
+                    // Always track frame times for stats on exit
+                    total_frames += 1;
+                    let now = Instant::now();
+                    frame_times.push_back(now);
+                    while frame_times.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(1)) {
+                        frame_times.pop_front();
+                    }
+
+                    if show_fps {
+                        write!(
+                            stdout,
+                            "\x1b[1;1H\x1b[48;5;0m\x1b[38;5;46m FPS: {} \x1b[0m",
+                            frame_times.len()
+                        )?;
+                    }
+
+                    stdout.flush()?;
                 }
             }
 
+            // --- Terminal events ---
             Some(Ok(event)) = events.next() => {
                 match event {
-                    Event::Key(key) => {
-                        dirty = true;
-                        if let Some(action) = app.handle_key(key) {
-                            match action {
-                                Action::GoBack => {
-                                    let mut req = core.go_back_request();
-                                    req.get().set_buffer_id(app.active_buffer_id);
-                                    req.send().promise.await?;
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        // TUI keybinds (intercepted, not sent to CEF)
+                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                            match key.code {
+                                KeyCode::Char('q') => break,
+                                KeyCode::Char('d') => {
+                                    show_fps = !show_fps;
+                                    if !show_fps { full_redraw = true; }
+                                    continue;
                                 }
-                                Action::GoForward => {
-                                    let mut req = core.go_forward_request();
-                                    req.get().set_buffer_id(app.active_buffer_id);
-                                    req.send().promise.await?;
-                                }
-                                Action::Reload => {
-                                    let mut req = core.reload_request();
-                                    req.get().set_buffer_id(app.active_buffer_id);
-                                    req.send().promise.await?;
-                                }
-                                Action::Command(cmd) => {
-                                    if cmd == "tabnew" || cmd == "tn" {
-                                        let mut req = core.create_buffer_request();
-                                        req.get().set_url("about:blank");
-                                        let _ = req.send().promise.await;
-                                    } else if cmd == "tabclose" || cmd == "tc" {
-                                        if app.buffers.len() <= 1 {
-                                            app.should_quit = true;
-                                        } else if app.active_buffer_id >= 0 {
-                                            let mut req = core.close_buffer_request();
-                                            req.get().set_buffer_id(app.active_buffer_id);
-                                            let _ = req.send().promise.await;
-                                        }
-                                    } else {
-                                        let url = if cmd.contains('.') || cmd.starts_with("http") {
-                                            if !cmd.starts_with("http") {
-                                                format!("https://{}", cmd)
-                                            } else {
-                                                cmd
-                                            }
-                                        } else {
-                                            cmd
-                                        };
-                                        let mut req = core.navigate_request();
-                                        req.get().set_buffer_id(app.active_buffer_id);
-                                        req.get().set_url(&url);
-                                        req.send().promise.await?;
-                                    }
-                                }
-                                Action::Navigate(url) => {
-                                    let mut req = core.navigate_request();
-                                    req.get().set_buffer_id(app.active_buffer_id);
-                                    req.get().set_url(&url);
-                                    req.send().promise.await?;
-                                }
-                                Action::SendKey { character, modifiers } => {
-                                    // Fire-and-forget: send all three key events without
-                                    // awaiting each round trip (Cap'n Proto guarantees
-                                    // in-order delivery on a single connection)
-                                    for key_type in [0u32, 3, 2] {
-                                        let mut req = core.send_key_event_request();
-                                        req.get().set_buffer_id(app.active_buffer_id);
-                                        let mut event = req.get().init_event();
-                                        event.set_type(match key_type {
-                                            0 => types_capnp::KeyEventType::RawKeyDown,
-                                            2 => types_capnp::KeyEventType::KeyUp,
-                                            3 => types_capnp::KeyEventType::Char,
-                                            _ => types_capnp::KeyEventType::RawKeyDown,
-                                        });
-                                        event.set_key_code(character);
-                                        event.set_character(character);
-                                        event.set_modifiers(modifiers);
-                                        let _ = req.send();
-                                    }
-                                }
-                                Action::NextTab => {
-                                    app.next_buffer();
-                                    let mut req = core.set_active_buffer_request();
-                                    req.get().set_buffer_id(app.active_buffer_id);
-                                    let _ = req.send().promise.await;
-                                }
-                                Action::PrevTab => {
-                                    app.prev_buffer();
-                                    let mut req = core.set_active_buffer_request();
-                                    req.get().set_buffer_id(app.active_buffer_id);
-                                    let _ = req.send().promise.await;
-                                }
-                                Action::NewTab(url) => {
-                                    let mut req = core.create_buffer_request();
-                                    req.get().set_url(&url);
-                                    let _ = req.send().promise.await;
-                                }
-                                Action::CloseTab => {
-                                    if app.active_buffer_id >= 0 {
-                                        let mut req = core.close_buffer_request();
-                                        req.get().set_buffer_id(app.active_buffer_id);
-                                        let _ = req.send().promise.await;
-                                    }
-                                }
+                                _ => {}
                             }
                         }
-                        if app.should_quit {
-                            break;
+
+                        let (character, modifiers) = key_to_cef(key.code, key.modifiers);
+                        if character == 0 { continue; }
+
+                        for key_type in [0u32, 3, 2] {
+                            let mut req = core.send_key_event_request();
+                            req.get().set_buffer_id(active_buffer_id);
+                            let mut ev = req.get().init_event();
+                            ev.set_type(match key_type {
+                                0 => types_capnp::KeyEventType::RawKeyDown,
+                                2 => types_capnp::KeyEventType::KeyUp,
+                                3 => types_capnp::KeyEventType::Char,
+                                _ => types_capnp::KeyEventType::RawKeyDown,
+                            });
+                            ev.set_key_code(character);
+                            ev.set_character(character);
+                            ev.set_modifiers(modifiers);
+                            let _ = req.send();
                         }
                     }
-                    Event::Resize(_cols, _rows) => {
-                        dirty = true;
-                        frame_dirty = true;
-                        if let Ok((pw, ph)) = viewport_pixel_size() {
+
+                    Event::Mouse(mouse) => {
+                        let (px, py) = cell_to_pixel(mouse.column, mouse.row);
+                        match mouse.kind {
+                            MouseEventKind::Down(btn) | MouseEventKind::Up(btn) => {
+                                let is_up = matches!(mouse.kind, MouseEventKind::Up(_));
+                                let mut req = core.send_mouse_event_request();
+                                req.get().set_buffer_id(active_buffer_id);
+                                let mut ev = req.get().init_event();
+                                ev.set_type(if is_up {
+                                    types_capnp::MouseEventType::Up
+                                } else {
+                                    types_capnp::MouseEventType::Down
+                                });
+                                ev.set_x(px);
+                                ev.set_y(py);
+                                ev.set_button(match btn {
+                                    MouseButton::Left => types_capnp::MouseButton::Left,
+                                    MouseButton::Middle => types_capnp::MouseButton::Middle,
+                                    MouseButton::Right => types_capnp::MouseButton::Right,
+                                });
+                                ev.set_modifiers(mouse_mods_to_cef(mouse.modifiers));
+                                let _ = req.send();
+                            }
+                            MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                                let mut req = core.send_mouse_event_request();
+                                req.get().set_buffer_id(active_buffer_id);
+                                let mut ev = req.get().init_event();
+                                ev.set_type(types_capnp::MouseEventType::Move);
+                                ev.set_x(px);
+                                ev.set_y(py);
+                                ev.set_button(types_capnp::MouseButton::None);
+                                ev.set_modifiers(mouse_mods_to_cef(mouse.modifiers));
+                                let _ = req.send();
+                            }
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                            | MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
+                                let (dx, dy) = match mouse.kind {
+                                    MouseEventKind::ScrollUp => (0, 120),
+                                    MouseEventKind::ScrollDown => (0, -120),
+                                    MouseEventKind::ScrollLeft => (-120, 0),
+                                    MouseEventKind::ScrollRight => (120, 0),
+                                    _ => (0, 0),
+                                };
+                                let mut req = core.send_scroll_event_request();
+                                req.get().set_buffer_id(active_buffer_id);
+                                req.get().set_delta_x(dx);
+                                req.get().set_delta_y(dy);
+                                let _ = req.send();
+                            }
+                        }
+                    }
+
+                    Event::Resize(_, _) => {
+                        if let Ok((new_pw, new_ph)) = viewport_pixel_size() {
                             let mut req = core.resize_request();
-                            req.get().set_buffer_id(app.active_buffer_id);
-                            req.get().set_width(pw);
-                            req.get().set_height(ph);
+                            req.get().set_buffer_id(active_buffer_id);
+                            req.get().set_width(new_pw);
+                            req.get().set_height(new_ph);
                             let _ = req.send().promise.await;
                         }
                     }
                     _ => {}
                 }
             }
-
-            Some(notif) = frame_rx.recv() => {
-                // Drain channel: keep only the latest frame, skip stale ones
-                let mut latest = notif;
-                while let Ok(newer) = frame_rx.try_recv() {
-                    latest = newer;
-                }
-
-                dirty = true;
-                frame_dirty = true;
-                let size = (latest.width * latest.height * 4) as usize;
-
-                // Always re-open shm — the core double-buffers between
-                // frame-0 and frame-1 on each swap. Only checking size
-                // misses name changes and reads from the wrong buffer.
-                current_shm = Some(ShmReader::open(&latest.shm_name, size)?);
-
-                app.frame = Some(FrameData {
-                    shm_name: latest.shm_name,
-                    width: latest.width,
-                    height: latest.height,
-                });
-            }
-
-            Some(update) = state_rx.recv() => {
-                dirty = true;
-                match update {
-                    StateUpdate::Title { buffer_id, title } => {
-                        app.update_buffer_title(buffer_id, title);
-                    }
-                    StateUpdate::Url { buffer_id, url } => {
-                        app.update_buffer_url(buffer_id, url);
-                    }
-                    StateUpdate::Loading { buffer_id, loading, .. } => {
-                        if let Some(buf) = app.buffers.iter_mut().find(|b| b.id == buffer_id) {
-                            buf.loading = loading;
-                        }
-                        if buffer_id == app.active_buffer_id {
-                            app.loading = loading;
-                        }
-                    }
-                    StateUpdate::Progress { .. } => {}
-                    StateUpdate::BufferCreated { id, url, title } => {
-                        app.add_buffer(id, url, title);
-                    }
-                    StateUpdate::BufferClosed { buffer_id } => {
-                        app.remove_buffer(buffer_id);
-                    }
-                }
-            }
         }
     }
 
-    // Cleanup: delete kitty images, restore terminal, remove tmpfs frame file
-    let mut stdout = std::io::stdout().lock();
+    // --- Write FPS stats ---
+    {
+        let elapsed = session_start.elapsed().as_secs_f64();
+        let avg_fps = if elapsed > 0.0 { total_frames as f64 / elapsed } else { 0.0 };
+        let current_fps = frame_times.len();
+        let stats = format!(
+            "session: {:.1}s\ntotal_frames: {}\navg_fps: {:.1}\nlast_fps: {}\n",
+            elapsed, total_frames, avg_fps, current_fps
+        );
+        let _ = std::fs::write("/tmp/dirtferret-fps.txt", &stats);
+        eprintln!("[tui] FPS stats written to /tmp/dirtferret-fps.txt");
+        eprintln!("[tui] {:.1}s, {} frames, avg {:.1} fps", elapsed, total_frames, avg_fps);
+    }
+
+    // --- Cleanup ---
     write!(stdout, "\x1b_Ga=d,d=a\x1b\\")?;
     stdout.flush()?;
-    drop(stdout);
-    let _ = std::fs::remove_file("/dev/shm/dirtferret-display");
-
-    crossterm::terminal::disable_raw_mode()?;
+    let _ = std::fs::remove_file(DISPLAY_PATH);
     crossterm::execute!(
-        std::io::stdout(),
+        stdout,
+        crossterm::event::DisableMouseCapture,
         crossterm::cursor::Show,
-        crossterm::terminal::LeaveAlternateScreen
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
     )?;
-
+    crossterm::terminal::disable_raw_mode()?;
     Ok(())
 }

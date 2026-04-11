@@ -29,23 +29,6 @@ public:
     std::cerr << "[rpc] UI attached (" << viewport_width_ << "x"
               << viewport_height_ << ")" << std::endl;
 
-    // Frame callback: notify TUI when a buffer paints
-    engine_.set_frame_callback(
-        [this](int32_t id, const void *, int w, int h) {
-          KJ_IF_MAYBE(ui, ui_) {
-            auto req = ui->onFrameRequest();
-            req.setBufferId(id);
-            req.setShmName(engine_.frame_shm_name(id));
-            req.setWidth(w);
-            req.setHeight(h);
-            req.setFormat(::PixelFormat::BGRA);
-            req.send().detach([](kj::Exception &&e) {
-              std::cerr << "[rpc] onFrame error: " << e.getDescription().cStr()
-                        << std::endl;
-            });
-          }
-        });
-
     // State change callback: push title/url/loading updates to TUI
     engine_.set_state_callback([this](int32_t buffer_id) {
       KJ_IF_MAYBE(ui, ui_) {

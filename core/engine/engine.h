@@ -6,9 +6,11 @@
 #include <string>
 #include <vector>
 
-// Callback for frame data from OnPaint.
-using FrameCallback = std::function<void(int32_t buffer_id, const void *pixels,
-                                         int width, int height)>;
+// Plain dirty rect — no CEF types outside engine/.
+struct DirtyRect {
+  int32_t x, y;
+  uint32_t width, height;
+};
 
 // Callback for buffer state changes.
 using StateCallback = std::function<void(int32_t buffer_id)>;
@@ -67,8 +69,7 @@ public:
                         int x, int y, uint32_t button, uint32_t modifiers);
   void send_scroll_event(int32_t buffer_id, int delta_x, int delta_y);
 
-  // --- Callbacks ---
-  void set_frame_callback(FrameCallback cb);
+  // --- Callbacks (non-frame events, delivered via RPC) ---
   void set_state_callback(StateCallback cb);
   void set_buffer_created_callback(BufferCreatedCallback cb);
   void set_buffer_closed_callback(BufferClosedCallback cb);

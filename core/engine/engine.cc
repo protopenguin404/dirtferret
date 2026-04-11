@@ -26,7 +26,6 @@ struct Engine::Impl {
   std::map<int32_t, BufferState> buffers;
   int32_t active_buffer = -1;
 
-  FrameCallback frame_callback;
   StateCallback state_callback;
   BufferCreatedCallback buffer_created_callback;
   BufferClosedCallback buffer_closed_callback;
@@ -86,7 +85,7 @@ int32_t Engine::create_buffer(const std::string &url,
   auto client = CefRefPtr<Client>(new Client());
 
   CefBrowserSettings browser_settings;
-  browser_settings.windowless_frame_rate = 10;
+  browser_settings.windowless_frame_rate = 60;
 
   CefWindowInfo window_info;
   window_info.SetAsWindowless(0);
@@ -115,7 +114,7 @@ int32_t Engine::create_buffer(const std::string &url,
     // Wire OnPaint to frame pool
     c->render_handler()->set_paint_callback(
         [this, browser_id](const void *buf, int w, int h,
-                           const CefRenderHandler::RectList &) {
+                           const CefRenderHandler::RectList &dirtyRects) {
           auto it = impl_->buffers.find(browser_id);
           if (it == impl_->buffers.end())
             return;
@@ -133,11 +132,14 @@ int32_t Engine::create_buffer(const std::string &url,
           if (!pool->write_buffer())
             return;
           std::memcpy(pool->write_buffer(), buf, pool->buffer_size());
-          pool->swap();
 
-          if (impl_->frame_callback) {
-            impl_->frame_callback(browser_id, pool->read_buffer(), w, h);
+          // Convert CefRects to NotifyDirtyRects and publish
+          std::vector<NotifyDirtyRect> rects;
+          rects.reserve(dirtyRects.size());
+          for (auto &r : dirtyRects) {
+            rects.push_back({r.x, r.y, (uint32_t)r.width, (uint32_t)r.height});
           }
+          pool->publish(rects);
         });
 
     impl_->buffers[browser_id] = std::move(state);
@@ -331,10 +333,6 @@ void Engine::resize(int32_t buffer_id, int width, int height) {
   it->second.client->render_handler()->set_view_size(width, height);
   if (it->second.client->browser())
     it->second.client->browser()->GetHost()->WasResized();
-}
-
-void Engine::set_frame_callback(FrameCallback cb) {
-  impl_->frame_callback = std::move(cb);
 }
 
 void Engine::set_state_callback(StateCallback cb) {
