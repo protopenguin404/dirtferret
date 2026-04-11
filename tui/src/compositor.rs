@@ -35,6 +35,13 @@ impl Compositor {
         let mut viewport_region = Region::new(2, Anchor::Fill)?;
         let mut status_bar = Region::new(3, Anchor::Bottom { height_cells: 1 })?;
 
+        // Z-ordering: viewport below chrome, both below text.
+        // Negative z = image drawn under terminal text (ANSI overlays visible).
+        // Chrome at -1 stacks above viewport at -2.
+        viewport_region.z_index = -2;
+        tab_bar.z_index = -1;
+        status_bar.z_index = -1;
+
         // Run initial layout to set positions and sizes.
         {
             let regions: &mut [&mut Region] = &mut [

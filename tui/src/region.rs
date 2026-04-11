@@ -38,6 +38,9 @@ pub struct Region {
     /// Display height in terminal rows (set by layout engine).
     /// Used as kitty `r=` to constrain image to exact cell bounds.
     pub cell_rows_span: u16,
+    /// Kitty z-index for stacking order. Negative = below text.
+    /// Viewport uses -2, chrome uses -1 (chrome above viewport, both below text).
+    pub z_index: i32,
     dirty: bool,
 }
 
@@ -66,6 +69,7 @@ impl Region {
             pixel_height: 0,
             cell_cols: 0,
             cell_rows_span: 0,
+            z_index: 0,
             dirty: false,
         })
     }
@@ -142,9 +146,9 @@ impl Region {
 
         write!(
             stdout,
-            "\x1b[{};1H\x1b_Ga=T,t=f,f=32,s={},v={},c={},r={},i={},C=1,q=2;{}\x1b\\",
+            "\x1b[{};1H\x1b_Ga=T,t=f,f=32,s={},v={},c={},r={},z={},i={},C=1,q=2;{}\x1b\\",
             self.cell_row, self.pixel_width, self.pixel_height,
-            self.cell_cols, self.cell_rows_span,
+            self.cell_cols, self.cell_rows_span, self.z_index,
             self.image_id, self.path_b64
         )?;
 
