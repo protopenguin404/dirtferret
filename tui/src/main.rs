@@ -276,15 +276,11 @@ async fn async_main() -> anyhow::Result<()> {
         }
     };
 
-    // Resize CEF to viewport rect (attachUi sent full terminal size,
-    // but the viewport is smaller due to chrome rows)
-    {
-        let mut req = core.resize_request();
-        req.get().set_buffer_id(active_id);
-        req.get().set_width(vp_rect.width);
-        req.get().set_height(vp_rect.height);
-        let _ = req.send().promise.await;
-    }
+    // NOTE: CEF renders at full terminal size (pw x ph from attachUi).
+    // The viewport rect is smaller (minus chrome rows), but we do NOT
+    // send a resize here — FramePool::resize() destroys and recreates
+    // shm segments, orphaning the TUI's cached mmaps.
+    // Chrome rendering is handled separately (see below).
 
     // --- Terminal setup ---
     crossterm::terminal::enable_raw_mode()?;

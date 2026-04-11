@@ -167,6 +167,42 @@ Buffer Viewport (viewport.rs, shm.rs)
   └── Forwards input for one buffer
 ```
 
+## TUI Compositing Model
+
+The TUI owns the final pixel output. Rather than relying on the terminal to layer text and images correctly, the TUI composites everything into a single output per frame. This gives the TUI full control over what the user sees and avoids conflicts between kitty graphics and terminal text.
+
+**The pipeline:**
+
+```
+CEF frame (BGRA pixels via shm)
+  |
+  v
+TUI: BGRA → RGBA conversion
+  |
+  v
+TUI: Composite chrome into pixel buffer
+  ├── Fill tab bar rows with background color
+  ├── Fill status line rows with background color
+  └── Web page pixels fill the viewport region
+  |
+  v
+TUI: Send full-terminal image via kitty graphics protocol
+  |
+  v
+TUI: Draw terminal text on top of chrome rows (ANSI escapes)
+  ├── Tab titles on row 1
+  └── Mode indicator, URL, FPS on bottom row
+  |
+  v
+Terminal: renders image + text (text is in front of images)
+```
+
+**Why compositing?** Kitty images and terminal text are separate layers. Different terminals handle layering differently, and refreshes from two output streams (stdout for images, stderr for text) create flicker. By compositing ourselves, we get one image + deterministic text overlay. The chrome background is a solid-color pixel fill in the image; the chrome text is real terminal text drawn on top (sharp, uses the terminal's font, supports formatting).
+
+**Components are render pools.** Each UI component (tab bar, status line, viewport) is responsible for its portion of the final pixel buffer. The compositor asks each component to fill its rows, then sends the result to kitty. When only the chrome changes (mode switch, title update), the compositor re-fills the chrome rows and re-sends without waiting for a new CEF frame.
+
+**CEF text formatting.** The compositor preserves CEF's control over text rendering within the viewport region — fonts, sizes, colors, underlines, strikethroughs are all in the pixel data from CEF's `OnPaint`. The TUI's chrome text (tab bar, status line) uses terminal text formatting (ANSI escapes), which is independent.
+
 ## Buffer / Window / Tab Model
 
 Following Neovim's triad:

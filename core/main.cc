@@ -233,33 +233,53 @@ public:
     auto params = context.getParams();
     std::string mode_str = params.getMode();
     uint32_t character = params.getCharacter();
+    uint32_t modifiers = params.getModifiers();
+
+    std::string key_str;
+    if (character < 128 && character > 0) {
+      key_str = std::string(1, static_cast<char>(character));
+    }
+
+    std::cerr << "[keybind] resolve: mode='" << mode_str
+              << "' char=" << character
+              << " key='" << key_str
+              << "' mods=" << modifiers << std::endl;
 
     auto *lua = engine_.lua_runtime();
     std::string action;
     std::string arg;
 
-    if (lua && lua->state()) {
+    if (!lua || !lua->state()) {
+      std::cerr << "[keybind] FAIL: no Lua runtime" << std::endl;
+    } else {
       auto *L = lua->state();
-      // dirtferret.keymap._maps[mode][key]
-      // Check each level for nil to avoid SIGSEGV if Lua init failed
       lua_getglobal(L, "dirtferret");
-      if (lua_istable(L, -1)) {
+      if (!lua_istable(L, -1)) {
+        std::cerr << "[keybind] FAIL: dirtferret global is not a table" << std::endl;
+      } else {
         lua_getfield(L, -1, "keymap");
-        if (lua_istable(L, -1)) {
+        if (!lua_istable(L, -1)) {
+          std::cerr << "[keybind] FAIL: dirtferret.keymap is not a table" << std::endl;
+        } else {
           lua_getfield(L, -1, "_maps");
-          if (lua_istable(L, -1)) {
+          if (!lua_istable(L, -1)) {
+            std::cerr << "[keybind] FAIL: dirtferret.keymap._maps missing (keymap.lua not loaded?)" << std::endl;
+          } else {
             lua_getfield(L, -1, mode_str.c_str());
-            if (lua_istable(L, -1)) {
-              std::string key_str;
-              if (character < 128 && character > 0) {
-                key_str = std::string(1, static_cast<char>(character));
-              }
+            if (!lua_istable(L, -1)) {
+              std::cerr << "[keybind] WARN: no bindings for mode '" << mode_str << "'" << std::endl;
+            } else {
               if (!key_str.empty()) {
                 lua_getfield(L, -1, key_str.c_str());
                 if (lua_isstring(L, -1)) {
                   action = lua_tostring(L, -1);
+                  std::cerr << "[keybind] HIT: '" << key_str << "' -> '" << action << "'" << std::endl;
+                } else {
+                  std::cerr << "[keybind] MISS: no binding for '" << key_str << "' in mode '" << mode_str << "'" << std::endl;
                 }
                 lua_pop(L, 1);
+              } else {
+                std::cerr << "[keybind] SKIP: non-printable character " << character << std::endl;
               }
             }
           }
@@ -268,6 +288,7 @@ public:
       lua_settop(L, 0);
     }
 
+    std::cerr << "[keybind] result: action='" << action << "' arg='" << arg << "'" << std::endl;
     context.getResults().setAction(action);
     context.getResults().setArg(arg);
     return kj::READY_NOW;
