@@ -8,6 +8,10 @@
 
 #include <iostream>
 
+extern "C" {
+#include <lua.h>
+}
+
 // --- RPC server implementation ---
 
 class CoreImpl final : public Core::Server {
@@ -222,6 +226,45 @@ public:
     engine_.send_scroll_event(params.getBufferId(),
                               params.getDeltaX(),
                               params.getDeltaY());
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> resolveKeybind(ResolveKeybindContext context) override {
+    auto params = context.getParams();
+    std::string mode_str = params.getMode();
+    uint32_t character = params.getCharacter();
+
+    auto *lua = engine_.lua_runtime();
+    std::string action;
+    std::string arg;
+
+    if (lua && lua->state()) {
+      auto *L = lua->state();
+      // dirtferret.keymap._maps[mode][key]
+      lua_getglobal(L, "dirtferret");
+      lua_getfield(L, -1, "keymap");
+      lua_getfield(L, -1, "_maps");
+      lua_getfield(L, -1, mode_str.c_str());
+
+      if (lua_istable(L, -1)) {
+        // Build key string from character
+        std::string key_str;
+        if (character < 128 && character > 0) {
+          key_str = std::string(1, static_cast<char>(character));
+        }
+        if (!key_str.empty()) {
+          lua_getfield(L, -1, key_str.c_str());
+          if (lua_isstring(L, -1)) {
+            action = lua_tostring(L, -1);
+          }
+          lua_pop(L, 1);
+        }
+      }
+      lua_settop(L, 0);
+    }
+
+    context.getResults().setAction(action);
+    context.getResults().setArg(arg);
     return kj::READY_NOW;
   }
 };

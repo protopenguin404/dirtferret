@@ -50,6 +50,11 @@ interface Core {
 
   # ---- Introspection ----
   getApiSchema @21 () -> (schema :Data);
+
+  # ---- Keybind resolution ----
+  # TUI sends keypress, core checks Lua keymap, returns action.
+  resolveKeybind @22 (mode :Text, keyCode :UInt32, character :UInt32,
+                       modifiers :UInt32) -> (action :Text, arg :Text);
 }
 
 # The UI callback interface — implemented by dirtferret-tui.
