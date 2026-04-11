@@ -167,41 +167,74 @@ Buffer Viewport (viewport.rs, shm.rs)
   └── Forwards input for one buffer
 ```
 
-## TUI Compositing Model
+## Region-Based Compositing
 
-The TUI owns the final pixel output. Rather than relying on the terminal to layer text and images correctly, the TUI composites everything into a single output per frame. This gives the TUI full control over what the user sees and avoids conflicts between kitty graphics and terminal text.
+The TUI uses a **region-based compositing model** where each visual element is an independent Region with its own pixel buffer, display file, and kitty image ID. The terminal composites multiple kitty images natively — we don't fight it, we use it.
 
-**The pipeline:**
+### Region — The Composable Primitive
+
+A Region is a rectangle on screen with:
+- A pixel buffer (RGBA) and its own display file on tmpfs
+- A unique kitty image ID (the terminal tracks each independently)
+- An anchor rule (Top, Bottom, or Fill) that determines positioning
+- A dirty flag — only re-sends to the terminal when content changes
+
+Each region renders independently via its own kitty image escape. Updating the viewport (8MB at 60fps) never re-sends the tab bar (few KB, changes on tab switch). The terminal layers the images.
+
+### Layout
 
 ```
-CEF frame (BGRA pixels via shm)
-  |
-  v
-TUI: BGRA → RGBA conversion
-  |
-  v
-TUI: Composite chrome into pixel buffer
-  ├── Fill tab bar rows with background color
-  ├── Fill status line rows with background color
-  └── Web page pixels fill the viewport region
-  |
-  v
-TUI: Send full-terminal image via kitty graphics protocol
-  |
-  v
-TUI: Draw terminal text on top of chrome rows (ANSI escapes)
-  ├── Tab titles on row 1
-  └── Mode indicator, URL, FPS on bottom row
-  |
-  v
-Terminal: renders image + text (text is in front of images)
+┌──────────────────────────────────────┐
+│  Region 1: Anchor::Top, 1 cell row   │  kitty image ID 1
+│  Tab bar (solid bg + ANSI text)      │
+├──────────────────────────────────────┤
+│                                      │
+│  Region 2: Anchor::Fill              │  kitty image ID 2
+│  Viewport (CEF frame from shm)       │
+│                                      │
+├──────────────────────────────────────┤
+│  Region 3: Anchor::Bottom, 1 cell    │  kitty image ID 3
+│  Status bar (solid bg + ANSI text)   │
+└──────────────────────────────────────┘
 ```
 
-**Why compositing?** Kitty images and terminal text are separate layers. Different terminals handle layering differently, and refreshes from two output streams (stdout for images, stderr for text) create flicker. By compositing ourselves, we get one image + deterministic text overlay. The chrome background is a solid-color pixel fill in the image; the chrome text is real terminal text drawn on top (sharp, uses the terminal's font, supports formatting).
+The layout engine computes pixel positions from anchor rules and terminal dimensions. Adding a new region (command input, split viewport) means adding another Region with an anchor — the layout engine handles positioning.
 
-**Components are render pools.** Each UI component (tab bar, status line, viewport) is responsible for its portion of the final pixel buffer. The compositor asks each component to fill its rows, then sends the result to kitty. When only the chrome changes (mode switch, title update), the compositor re-fills the chrome rows and re-sends without waiting for a new CEF frame.
+### Chrome Rendering
 
-**CEF text formatting.** The compositor preserves CEF's control over text rendering within the viewport region — fonts, sizes, colors, underlines, strikethroughs are all in the pixel data from CEF's `OnPaint`. The TUI's chrome text (tab bar, status line) uses terminal text formatting (ANSI escapes), which is independent.
+Chrome regions (tab bar, status bar) are a two-layer composite:
+1. **Pixel layer:** solid-color RGBA fill → sent as a kitty image (tiny, few KB)
+2. **Text layer:** ANSI escape sequences drawn on top → uses the terminal's own font, sharp at any size, full Unicode
+
+The viewport region is purely pixel — CEF's `OnPaint` produces the content, including all text formatting (fonts, sizes, colors, underlines).
+
+### Render Flow
+
+```
+Render tick (5ms):
+  For each region:
+    if dirty:
+      write rgba_buf → /dev/shm/dirtferret-region-{id}
+      send kitty image escape at region's cell position
+      if chrome: write ANSI text overlay
+  flush stdout
+
+Viewport region:
+  poll shm notify → convert BGRA→RGBA into region buffer → mark dirty
+
+Chrome regions:
+  dirty only on state change (mode switch, URL update, tab change)
+  re-render immediately on change (don't wait for tick)
+```
+
+### Composability
+
+The region model is the foundation for all future UI:
+- **Splits:** Multiple Fill regions in a horizontal/vertical arrangement
+- **Command input:** Bottom region that appears on `:` press
+- **Floating panels:** Regions with absolute positioning
+- **Lua-driven UI:** Lua defines which regions exist, their anchors, and content
+- **Per-region rates:** Viewport at 60fps, chrome at 1fps
 
 ## Buffer / Window / Tab Model
 
