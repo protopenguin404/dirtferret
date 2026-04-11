@@ -80,20 +80,35 @@ impl Compositor {
             self.viewport_region.mark_dirty();
         }
 
-        // Render all regions. Each Region checks its own dirty flag internally
-        // and returns early if clean, so we always call all three.
+        // Render order: viewport FIRST, then chrome ON TOP.
+        //
+        // Kitty images are cell-based — the most recently placed image at a
+        // cell position wins. The viewport re-renders every frame; if chrome
+        // rendered before it, the viewport image would cover chrome regions.
+        // By rendering chrome AFTER viewport, chrome is always the top layer.
+        //
+        // When the viewport renders a new frame, we force chrome dirty so it
+        // re-renders on the same tick. Cost is minimal (1-row chrome regions
+        // are a few KB vs the viewport's megabytes).
         let mut any_rendered = false;
+
+        if self.viewport_region.is_dirty() {
+            any_rendered = true;
+        }
+        self.viewport_region.render(stdout)?;
+
+        // Force chrome re-render whenever viewport rendered, so chrome
+        // stays on top of the viewport's kitty image.
+        if has_frame {
+            self.tab_bar.mark_dirty();
+            self.status_bar.mark_dirty();
+        }
 
         if self.tab_bar.is_dirty() {
             any_rendered = true;
         }
         self.tab_bar
             .render_with_text(stdout, &ui.tab_bar_ansi(self.cell_cols))?;
-
-        if self.viewport_region.is_dirty() {
-            any_rendered = true;
-        }
-        self.viewport_region.render(stdout)?;
 
         if self.status_bar.is_dirty() {
             any_rendered = true;

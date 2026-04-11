@@ -286,9 +286,9 @@ async fn async_main() -> anyhow::Result<()> {
     let mut stdout = std::io::stdout();
     crossterm::execute!(
         stdout,
+        crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableMouseCapture,
         crossterm::cursor::Hide,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
     )?;
 
     // --- Event loop state ---
@@ -517,7 +517,7 @@ async fn async_main() -> anyhow::Result<()> {
         stdout,
         crossterm::event::DisableMouseCapture,
         crossterm::cursor::Show,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::terminal::LeaveAlternateScreen,
     )?;
     crossterm::terminal::disable_raw_mode()?;
     Ok(())
