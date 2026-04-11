@@ -363,6 +363,36 @@ async fn async_main() -> anyhow::Result<()> {
                                     break; // quit
                                 }
                             }
+                            mode::Action::ResolveViaRpc => {
+                                let buf_id = mux_state.active_buffer_id().unwrap_or(1);
+                                let (character, modifiers) = input::key_to_cef(key.code, key.modifiers);
+                                if character == 0 { continue; }
+
+                                let mut req = core.resolve_keybind_request();
+                                req.get().set_mode("n"); // Lua uses "n" for normal
+                                req.get().set_key_code(character);
+                                req.get().set_character(character);
+                                req.get().set_modifiers(modifiers);
+
+                                if let Ok(response) = req.send().promise.await {
+                                    if let Ok(results) = response.get() {
+                                        let action_str = results.get_action()
+                                            .map(|r| r.to_str().unwrap_or("")).unwrap_or("");
+                                        let arg_str = results.get_arg()
+                                            .map(|r| r.to_str().unwrap_or("")).unwrap_or("");
+
+                                        if action_str.is_empty() {
+                                            // No binding in Lua — noop
+                                        } else if action_str.starts_with("switch-mode:") {
+                                            let new_mode = &action_str["switch-mode:".len()..];
+                                            current_mode = new_mode.to_string();
+                                            ui_state.set_mode(&current_mode);
+                                        } else if dispatch_action(action_str, arg_str, buf_id, &core, &mut mux_state) {
+                                            break; // quit
+                                        }
+                                    }
+                                }
+                            }
                             mode::Action::SendToCef => {
                                 let buf_id = mux_state.active_buffer_id().unwrap_or(1);
                                 let (character, modifiers) = input::key_to_cef(key.code, key.modifiers);
