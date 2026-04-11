@@ -66,12 +66,11 @@ impl Compositor {
         ui: &Ui,
         stdout: &mut impl Write,
     ) -> anyhow::Result<bool> {
-        // Check if CEF sent a frame at a different size than the viewport
-        // region expects. If so, resize the region to match.
-        let (fw, fh) = viewport.frame_dims();
-        if fw != self.viewport_region.pixel_width || fh != self.viewport_region.pixel_height {
-            self.viewport_region.resize(fw, fh)?;
-        }
+        // The viewport region stays at its layout-computed size. If CEF sends
+        // frames larger than the region (e.g., full terminal height before
+        // processing a viewport-only resize), convert_rect_bgra_to_rgba's
+        // bounds check (viewport.rs:41) safely clips the extra rows. This
+        // prevents the viewport's kitty image from extending into chrome rows.
 
         // Zero-copy: viewport writes BGRA->RGBA directly into the region buffer.
         let target = self.viewport_region.rgba_mut();
