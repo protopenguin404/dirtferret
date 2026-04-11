@@ -1,4 +1,5 @@
 mod input;
+mod mode;
 mod mux;
 mod ui;
 mod shm;
