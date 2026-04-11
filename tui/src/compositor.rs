@@ -18,6 +18,7 @@ pub struct Compositor {
     pixel_height: u32,
     cell_cols: u16,
     cell_rows: u16,
+    chrome_dirty: bool,
 }
 
 impl Compositor {
@@ -58,6 +59,7 @@ impl Compositor {
             status_bar,
             pixel_width,
             pixel_height,
+            chrome_dirty: true,
             cell_cols,
             cell_rows,
         })
@@ -103,24 +105,18 @@ impl Compositor {
         }
         self.viewport_region.render(stdout)?;
 
-        // Force chrome re-render whenever viewport rendered, so chrome
-        // stays on top of the viewport's kitty image.
-        if has_frame {
-            self.tab_bar.mark_dirty();
-            self.status_bar.mark_dirty();
-        }
-
-        if self.tab_bar.is_dirty() {
+        // Chrome uses pure ANSI text with background colors (no kitty images).
+        // ANSI text is always above negative-z kitty images, so chrome bg
+        // colors render on top of the viewport without z-ordering issues.
+        //
+        // Re-send chrome whenever viewport rendered (ANSI layer needs refresh
+        // after a kitty image placement) or when chrome state changed.
+        if has_frame || self.chrome_dirty {
+            stdout.write_all(ui.tab_bar_ansi(self.cell_cols).as_bytes())?;
+            stdout.write_all(ui.status_line_ansi(self.cell_cols, self.cell_rows).as_bytes())?;
+            self.chrome_dirty = false;
             any_rendered = true;
         }
-        self.tab_bar
-            .render_with_text(stdout, &ui.tab_bar_ansi(self.cell_cols))?;
-
-        if self.status_bar.is_dirty() {
-            any_rendered = true;
-        }
-        self.status_bar
-            .render_with_text(stdout, &ui.status_line_ansi(self.cell_cols, self.cell_rows))?;
 
         if any_rendered {
             stdout.flush()?;
@@ -129,13 +125,12 @@ impl Compositor {
         Ok(any_rendered)
     }
 
-    /// Mark chrome regions (tab bar, status bar) as dirty by filling them
-    /// with their background colors. They will re-render on the next tick.
+    /// Mark chrome as needing a re-render on the next tick.
+    /// Chrome is pure ANSI text (bg colors + text), no kitty images.
     ///
     /// Call this when mode changes, URL updates, tab switches, etc.
-    pub fn invalidate_chrome(&mut self, ui: &Ui) {
-        self.tab_bar.fill_solid(ui.tab_bar_bg);
-        self.status_bar.fill_solid(ui.status_bar_bg);
+    pub fn invalidate_chrome(&mut self) {
+        self.chrome_dirty = true;
     }
 
     /// Recompute layout for new terminal dimensions and mark all regions dirty.

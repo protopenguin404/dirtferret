@@ -124,8 +124,11 @@ impl Ui {
         let max_w = cols as usize;
         let mut out = String::with_capacity(256);
 
-        // Cursor to row 1, col 1; disable autowrap
-        out.push_str("\x1b[1;1H\x1b[?7l");
+        // Cursor to row 1, col 1; disable autowrap; fill row with bg color
+        let [r, g, b, _] = self.tab_bar_bg;
+        out.push_str(&format!(
+            "\x1b[1;1H\x1b[?7l\x1b[48;2;{};{};{}m\x1b[2K", r, g, b
+        ));
 
         if self.tab_titles.is_empty() {
             // Reset and re-enable autowrap
@@ -201,8 +204,11 @@ impl Ui {
         let max_w = cols as usize;
         let mut out = String::with_capacity(512);
 
-        // Cursor to last row, col 1; disable autowrap
-        out.push_str(&format!("\x1b[{};1H\x1b[?7l", rows));
+        // Cursor to last row, col 1; disable autowrap; fill row with bg color
+        let [r, g, b, _] = self.status_bar_bg;
+        out.push_str(&format!(
+            "\x1b[{};1H\x1b[?7l\x1b[48;2;{};{};{}m\x1b[2K", rows, r, g, b
+        ));
 
         // Pre-render each group into (ansi_string, display_width) pairs
         let left = Self::render_segments(&self.status_left);

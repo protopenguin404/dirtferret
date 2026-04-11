@@ -239,7 +239,7 @@ async fn async_main() -> anyhow::Result<()> {
     // --- Compositor: region-based rendering ---
     // Created before attachUi so we know the viewport dimensions to send to core.
     let mut compositor = compositor::Compositor::new(pw, ph, cols, rows)?;
-    compositor.invalidate_chrome(&ui_state);
+    compositor.invalidate_chrome();
     let (vp_w, vp_h) = compositor.viewport_dims();
 
     // --- RPC callbacks via channel ---
@@ -353,7 +353,7 @@ async fn async_main() -> anyhow::Result<()> {
                             mode::Action::SwitchMode(new_mode) => {
                                 current_mode = new_mode;
                                 ui_state.set_mode(&current_mode);
-                                compositor.invalidate_chrome(&ui_state);
+                                compositor.invalidate_chrome();
                             }
                             mode::Action::Execute(name, arg) => {
                                 let buf_id = mux_state.active_buffer_id().unwrap_or(1);
@@ -385,7 +385,7 @@ async fn async_main() -> anyhow::Result<()> {
                                             let new_mode = &action_str["switch-mode:".len()..];
                                             current_mode = new_mode.to_string();
                                             ui_state.set_mode(&current_mode);
-                                            compositor.invalidate_chrome(&ui_state);
+                                            compositor.invalidate_chrome();
                                         } else if dispatch_action(action_str, arg_str, buf_id, &core, &mut mux_state) {
                                             break; // quit
                                         }
@@ -468,7 +468,7 @@ async fn async_main() -> anyhow::Result<()> {
                         if let Ok((new_pw, new_ph)) = input::viewport_pixel_size() {
                             // Resize compositor layout
                             compositor.resize(new_pw, new_ph, new_cols, new_rows)?;
-                            compositor.invalidate_chrome(&ui_state);
+                            compositor.invalidate_chrome();
 
                             // Tell core about new viewport dimensions
                             let (vp_w, vp_h) = compositor.viewport_dims();
