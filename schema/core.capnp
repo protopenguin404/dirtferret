@@ -55,6 +55,18 @@ interface Core {
   # TUI sends keypress, core checks Lua keymap, returns action.
   resolveKeybind @22 (mode :Text, keyCode :UInt32, character :UInt32,
                        modifiers :UInt32) -> (action :Text, arg :Text);
+
+  # ---- DOM queries (async — returns when CDP responds) ----
+  elementAt @23 (bufferId :Int32, x :Int32, y :Int32) -> (element :Types.RpcElementInfo);
+  query     @24 (bufferId :Int32, selector :Text) -> (elements :List(Types.RpcElementInfo));
+
+  # ---- Region management ----
+  regionAdd    @25 (bufferId :Int32, x :Int32, y :Int32) -> (regionId :UInt32);
+  regionRemove @26 (bufferId :Int32, regionId :UInt32) -> ();
+  regionMove   @27 (bufferId :Int32, regionId :UInt32, x :Int32, y :Int32) -> ();
+  regionSelect @28 (bufferId :Int32, scope :Types.RpcScope, selectorArg :Text) -> ();
+  regionClear  @29 (bufferId :Int32) -> ();
+  getRegions   @30 (bufferId :Int32) -> (regions :List(Types.RegionInfo));
 }
 
 # The UI callback interface — implemented by dirtferret-tui.

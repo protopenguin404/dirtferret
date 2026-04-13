@@ -1,4 +1,5 @@
 #include "engine/engine.h"
+#include "engine/region.h"
 #include "lua/runtime.h"
 #include "schema/core.capnp.h"
 #include <capnp/ez-rpc.h>
@@ -7,6 +8,7 @@
 #include <kj/timer.h>
 
 #include <iostream>
+#include <memory>
 
 extern "C" {
 #include <lua.h>
@@ -291,6 +293,127 @@ public:
     std::cerr << "[keybind] result: action='" << action << "' arg='" << arg << "'" << std::endl;
     context.getResults().setAction(action);
     context.getResults().setArg(arg);
+    return kj::READY_NOW;
+  }
+
+  // ---- DOM queries (async — CDP round-trips) ----
+
+  kj::Promise<void> elementAt(ElementAtContext context) override {
+    auto params = context.getParams();
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    auto fulfiller = std::make_shared<kj::Own<kj::PromiseFulfiller<void>>>(
+        kj::mv(paf.fulfiller));
+
+    engine_.element_at(params.getBufferId(), params.getX(), params.getY(),
+        [context, fulfiller](ElementInfo info) mutable {
+          auto el = context.getResults().getElement();
+          el.setNodeId(info.node_id);
+          el.setTag(info.tag);
+          el.setText(info.text);
+          auto b = el.getBounds();
+          b.setX(info.bounds_x);
+          b.setY(info.bounds_y);
+          b.setWidth(info.bounds_width);
+          b.setHeight(info.bounds_height);
+          auto attrs = el.initAttributes(info.attributes.size());
+          for (size_t i = 0; i < info.attributes.size(); ++i) {
+            attrs[i].setName(info.attributes[i].first);
+            attrs[i].setValue(info.attributes[i].second);
+          }
+          (*fulfiller)->fulfill();
+        });
+
+    return kj::mv(paf.promise);
+  }
+
+  kj::Promise<void> query(QueryContext context) override {
+    auto params = context.getParams();
+    std::string selector = params.getSelector();
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    auto fulfiller = std::make_shared<kj::Own<kj::PromiseFulfiller<void>>>(
+        kj::mv(paf.fulfiller));
+
+    engine_.query(params.getBufferId(), selector,
+        [context, fulfiller](
+            std::vector<ElementInfo> elements) mutable {
+          auto results = context.getResults();
+          auto list = results.initElements(elements.size());
+          for (size_t i = 0; i < elements.size(); ++i) {
+            list[i].setNodeId(elements[i].node_id);
+            list[i].setTag(elements[i].tag);
+            list[i].setText(elements[i].text);
+            auto b = list[i].getBounds();
+            b.setX(elements[i].bounds_x);
+            b.setY(elements[i].bounds_y);
+            b.setWidth(elements[i].bounds_width);
+            b.setHeight(elements[i].bounds_height);
+            auto attrs = list[i].initAttributes(elements[i].attributes.size());
+            for (size_t j = 0; j < elements[i].attributes.size(); ++j) {
+              attrs[j].setName(elements[i].attributes[j].first);
+              attrs[j].setValue(elements[i].attributes[j].second);
+            }
+          }
+          (*fulfiller)->fulfill();
+        });
+
+    return kj::mv(paf.promise);
+  }
+
+  // ---- Region management ----
+
+  kj::Promise<void> regionAdd(RegionAddContext context) override {
+    auto params = context.getParams();
+    auto rid = engine_.region_add(params.getBufferId(), params.getX(), params.getY());
+    context.getResults().setRegionId(rid);
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> regionRemove(RegionRemoveContext context) override {
+    auto params = context.getParams();
+    engine_.region_remove(params.getBufferId(), params.getRegionId());
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> regionMove(RegionMoveContext context) override {
+    auto params = context.getParams();
+    engine_.region_move(params.getBufferId(), params.getRegionId(),
+                        params.getX(), params.getY());
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> regionSelect(RegionSelectContext context) override {
+    auto params = context.getParams();
+    auto scope = static_cast<Scope>(static_cast<int>(params.getScope()));
+    std::string selector_arg = params.getSelectorArg();
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    auto fulfiller = std::make_shared<kj::Own<kj::PromiseFulfiller<void>>>(
+        kj::mv(paf.fulfiller));
+
+    engine_.region_select(params.getBufferId(), scope, selector_arg,
+        [fulfiller]() mutable {
+          (*fulfiller)->fulfill();
+        });
+
+    return kj::mv(paf.promise);
+  }
+
+  kj::Promise<void> regionClear(RegionClearContext context) override {
+    engine_.region_clear(context.getParams().getBufferId());
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> getRegions(GetRegionsContext context) override {
+    auto id = context.getParams().getBufferId();
+    auto regions = engine_.get_regions(id);
+    auto results = context.getResults();
+    auto list = results.initRegions(regions.size());
+    for (size_t i = 0; i < regions.size(); ++i) {
+      list[i].setId(regions[i].id);
+      list[i].setAnchorX(regions[i].anchor.x);
+      list[i].setAnchorY(regions[i].anchor.y);
+      list[i].setHeadX(regions[i].head.x);
+      list[i].setHeadY(regions[i].head.y);
+    }
     return kj::READY_NOW;
   }
 };

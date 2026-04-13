@@ -56,3 +56,13 @@ target_link_libraries(test-input PRIVATE
   GTest::gtest_main
 )
 add_test(NAME test-input COMMAND test-input)
+
+# --- test-region: RegionSet operations (no CEF dependency) ---
+add_executable(test-region test_region.cc)
+target_include_directories(test-region PRIVATE
+  ${CMAKE_SOURCE_DIR}/core
+)
+target_link_libraries(test-region PRIVATE
+  GTest::gtest_main
+)
+add_test(NAME test-region COMMAND test-region)

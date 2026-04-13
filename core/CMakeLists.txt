@@ -7,6 +7,7 @@ set(ENGINE_SOURCES
   engine/renderer.cc
   engine/engine.cc
   engine/input.cc
+  engine/dom_bridge.cc
   shm/frame_pool.cc
   lua/runtime.cc
 )

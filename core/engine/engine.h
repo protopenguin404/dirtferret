@@ -6,11 +6,7 @@
 #include <string>
 #include <vector>
 
-// Plain dirty rect — no CEF types outside engine/.
-struct DirtyRect {
-  int32_t x, y;
-  uint32_t width, height;
-};
+#include "engine/region.h"  // Point, Region, RegionSet, ElementInfo, DirtyRect
 
 // Callback for buffer state changes.
 using StateCallback = std::function<void(int32_t buffer_id)>;
@@ -19,7 +15,8 @@ using StateCallback = std::function<void(int32_t buffer_id)>;
 using BufferCreatedCallback = std::function<void(int32_t buffer_id)>;
 using BufferClosedCallback = std::function<void(int32_t buffer_id)>;
 
-class LuaRuntime; // forward declaration
+class DomBridge;   // forward declaration
+class LuaRuntime;  // forward declaration
 
 class Engine {
 public:
@@ -73,6 +70,22 @@ public:
   void set_state_callback(StateCallback cb);
   void set_buffer_created_callback(BufferCreatedCallback cb);
   void set_buffer_closed_callback(BufferClosedCallback cb);
+
+  // --- DOM queries (async, callback-based) ---
+  void element_at(int32_t buffer_id, int x, int y,
+                  std::function<void(ElementInfo)> callback);
+  void query(int32_t buffer_id, const std::string& selector,
+             std::function<void(std::vector<ElementInfo>)> callback);
+
+  // --- Region management ---
+  uint32_t region_add(int32_t buffer_id, int x, int y);
+  void region_remove(int32_t buffer_id, uint32_t region_id);
+  void region_move(int32_t buffer_id, uint32_t region_id, int x, int y);
+  void region_select(int32_t buffer_id, Scope scope,
+                     const std::string& selector_arg,
+                     std::function<void()> callback);
+  void region_clear(int32_t buffer_id);
+  std::vector<Region> get_regions(int32_t buffer_id) const;
 
   // --- Lua ---
   LuaRuntime *lua_runtime();

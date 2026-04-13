@@ -1,6 +1,7 @@
 #include "engine/engine.h"
 #include "engine/app.h"
 #include "engine/client.h"
+#include "engine/dom_bridge.h"
 #include "engine/input.h"
 #include "lua/runtime.h"
 #include "include/cef_app.h"
@@ -15,6 +16,8 @@ struct BufferState {
   CefRefPtr<Client> client;
   std::unique_ptr<FramePool> frame_pool;
   int32_t id = -1;
+  RegionSet regions;
+  CefRefPtr<DomBridge> dom_bridge;
 };
 
 struct Engine::Impl {
@@ -142,6 +145,10 @@ int32_t Engine::create_buffer(const std::string &url,
           pool->publish(rects);
         });
 
+    // Initialize DOM bridge for CDP access
+    state.dom_bridge = new DomBridge(c->browser());
+    state.dom_bridge->enable();
+
     impl_->buffers[browser_id] = std::move(state);
 
     if (impl_->active_buffer < 0) {
@@ -160,6 +167,13 @@ int32_t Engine::create_buffer(const std::string &url,
 
   client->set_on_closed([this](int32_t browser_id) {
     std::cerr << "[engine] Buffer closed: " << browser_id << std::endl;
+
+    // Disable DomBridge observer before destroying BufferState
+    // to prevent dangling callbacks from in-flight CDP responses.
+    auto it = impl_->buffers.find(browser_id);
+    if (it != impl_->buffers.end() && it->second.dom_bridge) {
+      it->second.dom_bridge->disable();
+    }
 
     if (impl_->buffer_closed_callback) {
       impl_->buffer_closed_callback(browser_id);
@@ -427,6 +441,131 @@ void Engine::send_scroll_event(int32_t buffer_id, int delta_x, int delta_y) {
   event.y = 0;
   event.modifiers = 0;
   browser->GetHost()->SendMouseWheelEvent(event, translated.delta_x, translated.delta_y);
+}
+
+// --- DOM queries ---
+
+void Engine::element_at(int32_t buffer_id, int x, int y,
+                        std::function<void(ElementInfo)> callback) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end() || !it->second.dom_bridge) {
+    callback(ElementInfo{});
+    return;
+  }
+  it->second.dom_bridge->element_at(x, y, std::move(callback));
+}
+
+void Engine::query(int32_t buffer_id, const std::string& selector,
+                   std::function<void(std::vector<ElementInfo>)> callback) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end() || !it->second.dom_bridge) {
+    callback({});
+    return;
+  }
+  it->second.dom_bridge->query(selector, std::move(callback));
+}
+
+// --- Region management ---
+
+uint32_t Engine::region_add(int32_t buffer_id, int x, int y) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end()) return 0;
+  auto rid = it->second.regions.add({x, y});
+  if (it->second.dom_bridge) {
+    it->second.dom_bridge->inject_cursor_visual(rid, x, y);
+  }
+  return rid;
+}
+
+void Engine::region_remove(int32_t buffer_id, uint32_t region_id) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end()) return;
+  it->second.regions.remove(region_id);
+  if (it->second.dom_bridge) {
+    it->second.dom_bridge->remove_cursor_visual(region_id);
+  }
+}
+
+void Engine::region_move(int32_t buffer_id, uint32_t region_id, int x, int y) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end()) return;
+  it->second.regions.move(region_id, {x, y});
+  if (it->second.dom_bridge) {
+    it->second.dom_bridge->inject_cursor_visual(region_id, x, y);
+  }
+}
+
+void Engine::region_select(int32_t buffer_id, Scope scope,
+                           const std::string& selector_arg,
+                           std::function<void()> callback) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end()) {
+    if (callback) callback();
+    return;
+  }
+  auto& buf = it->second;
+  if (!buf.dom_bridge || buf.regions.count() == 0) {
+    if (callback) callback();
+    return;
+  }
+
+  // For v1: only Element scope. Others return immediately.
+  if (scope != Scope::Element) {
+    std::cerr << "[engine] region_select: scope not yet implemented\n";
+    if (callback) callback();
+    return;
+  }
+
+  // Process first region only for v1
+  auto* primary = buf.regions.primary();
+  if (!primary) {
+    if (callback) callback();
+    return;
+  }
+
+  uint32_t rid = primary->id;
+  int hx = primary->head.x;
+  int hy = primary->head.y;
+
+  buf.dom_bridge->element_at(hx, hy,
+      [this, buffer_id, rid, cb = std::move(callback)](ElementInfo info) {
+        auto it2 = impl_->buffers.find(buffer_id);
+        if (it2 == impl_->buffers.end()) {
+          if (cb) cb();
+          return;
+        }
+
+        if (info.node_id >= 0 && info.bounds_width > 0) {
+          Point anchor = {info.bounds_x, info.bounds_y};
+          Point head = {
+              static_cast<int32_t>(info.bounds_x + info.bounds_width),
+              static_cast<int32_t>(info.bounds_y + info.bounds_height)
+          };
+          it2->second.regions.set_selection(rid, anchor, head);
+
+          if (it2->second.dom_bridge) {
+            it2->second.dom_bridge->highlight_node(
+                info.node_id, 0, 120, 255, 0.3f);
+          }
+        }
+
+        if (cb) cb();
+      });
+}
+
+void Engine::region_clear(int32_t buffer_id) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end()) return;
+  it->second.regions.clear();
+  if (it->second.dom_bridge) {
+    it->second.dom_bridge->clear_all_visuals();
+  }
+}
+
+std::vector<Region> Engine::get_regions(int32_t buffer_id) const {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end()) return {};
+  return it->second.regions.all();
 }
 
 void Engine::do_message_loop_work() {
