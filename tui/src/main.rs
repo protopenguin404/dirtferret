@@ -152,15 +152,26 @@ impl core_capnp::ui::Server for UiImpl {
 
 // --- Action dispatch helper ---
 
-fn dispatch_action(
+enum DispatchResult {
+    Done,
+    Quit,
+    ModeSwitch(String),
+}
+
+async fn dispatch_action(
     name: &str,
-    _arg: &str,
+    arg: &str,
     buf_id: i32,
     core: &core_capnp::core::Client,
     mux_state: &mut mux::Mux,
-) -> bool {
+    ui_state: &mut ui::Ui,
+    command_buffer: &mut String,
+    command_prefix: &mut String,
+) -> DispatchResult {
     match name {
-        "quit" => return true,
+        "quit" => return DispatchResult::Quit,
+
+        // --- Scrolling ---
         "scroll-down" => {
             let mut r = core.send_scroll_event_request();
             r.get().set_buffer_id(buf_id);
@@ -185,6 +196,8 @@ fn dispatch_action(
             r.get().set_delta_y(600);
             let _ = r.send();
         }
+
+        // --- Navigation ---
         "go-back" => {
             let mut r = core.go_back_request();
             r.get().set_buffer_id(buf_id);
@@ -200,13 +213,210 @@ fn dispatch_action(
             r.get().set_buffer_id(buf_id);
             let _ = r.send();
         }
+
+        // --- Tabs ---
         "tab-next" => { mux_state.next_tab(); }
         "tab-prev" => { mux_state.prev_tab(); }
+
+        // --- Cursor navigation ---
+        "cursor-init" => {
+            let mut r = core.cursor_init_request();
+            r.get().set_buffer_id(buf_id);
+            match r.send().promise.await {
+                Ok(response) => {
+                    if let Ok(results) = response.get() {
+                        if results.get_active() {
+                            return DispatchResult::ModeSwitch("cursor".into());
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        "cursor-next" => {
+            let mut r = core.cursor_next_request();
+            r.get().set_buffer_id(buf_id);
+            let _ = r.send().promise.await;
+        }
+        "cursor-prev" => {
+            let mut r = core.cursor_prev_request();
+            r.get().set_buffer_id(buf_id);
+            let _ = r.send().promise.await;
+        }
+        "cursor-left" => {
+            let mut r = core.cursor_move_dir_request();
+            r.get().set_buffer_id(buf_id);
+            r.get().set_dx(-1);
+            r.get().set_dy(0);
+            r.get().set_extend(false);
+            let _ = r.send().promise.await;
+        }
+        "cursor-right" => {
+            let mut r = core.cursor_move_dir_request();
+            r.get().set_buffer_id(buf_id);
+            r.get().set_dx(1);
+            r.get().set_dy(0);
+            r.get().set_extend(false);
+            let _ = r.send().promise.await;
+        }
+        "cursor-up" => {
+            let mut r = core.cursor_move_dir_request();
+            r.get().set_buffer_id(buf_id);
+            r.get().set_dx(0);
+            r.get().set_dy(-1);
+            r.get().set_extend(false);
+            let _ = r.send().promise.await;
+        }
+        "cursor-down" => {
+            let mut r = core.cursor_move_dir_request();
+            r.get().set_buffer_id(buf_id);
+            r.get().set_dx(0);
+            r.get().set_dy(1);
+            r.get().set_extend(false);
+            let _ = r.send().promise.await;
+        }
+        "cursor-activate" => {
+            let mut r = core.cursor_activate_request();
+            r.get().set_buffer_id(buf_id);
+            let _ = r.send();
+        }
+        "cursor-clear" => {
+            let mut r = core.cursor_clear_request();
+            r.get().set_buffer_id(buf_id);
+            let _ = r.send();
+            return DispatchResult::ModeSwitch("normal".into());
+        }
+
+        // --- Follow links ---
+        "follow-init" => {
+            let mut r = core.match_set_request();
+            r.get().set_buffer_id(buf_id);
+            r.get().set_selector("a[href]");
+            match r.send().promise.await {
+                Ok(response) => {
+                    if let Ok(results) = response.get() {
+                        if results.get_count() > 0 {
+                            return DispatchResult::ModeSwitch("cursor".into());
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        "match-next" => {
+            let mut r = core.match_next_request();
+            r.get().set_buffer_id(buf_id);
+            let _ = r.send().promise.await;
+        }
+        "match-prev" => {
+            let mut r = core.match_prev_request();
+            r.get().set_buffer_id(buf_id);
+            let _ = r.send().promise.await;
+        }
+
+        // --- Visual mode extensions (cursor movement with extend=true) ---
+        "visual-left" | "visual-right" | "visual-up" | "visual-down" | "visual-next" => {
+            if name == "visual-next" {
+                let mut r = core.cursor_next_request();
+                r.get().set_buffer_id(buf_id);
+                let _ = r.send().promise.await;
+            } else {
+                let (dx, dy) = match name {
+                    "visual-left" => (-1, 0),
+                    "visual-right" => (1, 0),
+                    "visual-up" => (0, -1),
+                    "visual-down" => (0, 1),
+                    _ => (0, 0),
+                };
+                let mut r = core.cursor_move_dir_request();
+                r.get().set_buffer_id(buf_id);
+                r.get().set_dx(dx);
+                r.get().set_dy(dy);
+                r.get().set_extend(true);
+                let _ = r.send().promise.await;
+            }
+        }
+
+        // --- Command mode ---
+        "command-char" => {
+            command_buffer.push_str(arg);
+            ui_state.set_command_line(command_prefix, command_buffer);
+        }
+        "command-backspace" => {
+            command_buffer.pop();
+            ui_state.set_command_line(command_prefix, command_buffer);
+        }
+        "command-cancel" => {
+            command_buffer.clear();
+            command_prefix.clear();
+            ui_state.clear_command_line();
+            return DispatchResult::ModeSwitch("normal".into());
+        }
+        "command-execute" => {
+            let full_command = format!("{}{}", command_prefix, command_buffer);
+            command_buffer.clear();
+            command_prefix.clear();
+            ui_state.clear_command_line();
+
+            // Parse and execute command
+            let parts: Vec<&str> = full_command.splitn(2, ' ').collect();
+            match parts.first().copied() {
+                Some("goto") | Some("open") | Some("go") => {
+                    if let Some(url) = parts.get(1) {
+                        let mut url_str = url.to_string();
+                        if !url_str.contains("://") {
+                            url_str = format!("https://{}", url_str);
+                        }
+                        let mut r = core.navigate_request();
+                        r.get().set_buffer_id(buf_id);
+                        r.get().set_url(&url_str);
+                        let _ = r.send();
+                    }
+                }
+                Some("query") | Some("q") => {
+                    if let Some(selector) = parts.get(1) {
+                        let mut r = core.match_set_request();
+                        r.get().set_buffer_id(buf_id);
+                        r.get().set_selector(selector);
+                        match r.send().promise.await {
+                            Ok(response) => {
+                                if let Ok(results) = response.get() {
+                                    if results.get_count() > 0 {
+                                        return DispatchResult::ModeSwitch("cursor".into());
+                                    }
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("[tui] unknown command: {}", full_command);
+                }
+            }
+            return DispatchResult::ModeSwitch("normal".into());
+        }
+
+        // --- Command entry (from Lua: "command-enter" or "command-enter:prefix") ---
+        other if other == "command-enter" || other.starts_with("command-enter:") => {
+            let prefix = other.strip_prefix("command-enter:").unwrap_or("").to_string();
+            *command_prefix = prefix;
+            command_buffer.clear();
+            ui_state.set_command_line(command_prefix, command_buffer);
+            return DispatchResult::ModeSwitch("command".into());
+        }
+
+        // --- switch-mode:* from Lua keymaps ---
+        other if other.starts_with("switch-mode:") => {
+            let new_mode = &other["switch-mode:".len()..];
+            return DispatchResult::ModeSwitch(new_mode.to_string());
+        }
+
         other => {
             eprintln!("[tui] Unknown action: {}", other);
         }
     }
-    false // not quit
+    DispatchResult::Done
 }
 
 // --- Main ---
@@ -235,6 +445,8 @@ async fn async_main() -> anyhow::Result<()> {
     let mut ui_state = ui::Ui::new();
     let mut current_mode = mode::MODE_NORMAL.to_string();
     let mut current_url = String::new();
+    let mut command_buffer = String::new();
+    let mut command_prefix = String::new();
 
     // --- Compositor: region-based rendering ---
     // Created before attachUi so we know the viewport dimensions to send to core.
@@ -357,8 +569,18 @@ async fn async_main() -> anyhow::Result<()> {
                             }
                             mode::Action::Execute(name, arg) => {
                                 let buf_id = mux_state.active_buffer_id().unwrap_or(1);
-                                if dispatch_action(&name, &arg, buf_id, &core, &mut mux_state) {
-                                    break; // quit
+                                let result = dispatch_action(
+                                    &name, &arg, buf_id, &core, &mut mux_state,
+                                    &mut ui_state, &mut command_buffer, &mut command_prefix,
+                                ).await;
+                                match result {
+                                    DispatchResult::Quit => break,
+                                    DispatchResult::ModeSwitch(new_mode) => {
+                                        current_mode = new_mode;
+                                        ui_state.set_mode(&current_mode);
+                                        compositor.invalidate_chrome();
+                                    }
+                                    DispatchResult::Done => {}
                                 }
                             }
                             mode::Action::ResolveViaRpc => {
@@ -366,8 +588,9 @@ async fn async_main() -> anyhow::Result<()> {
                                 let (character, modifiers) = input::key_to_cef(key.code, key.modifiers);
                                 if character == 0 { continue; }
 
+                                let lua_mode = mode::lua_mode_key(&current_mode);
                                 let mut req = core.resolve_keybind_request();
-                                req.get().set_mode("n"); // Lua uses "n" for normal
+                                req.get().set_mode(lua_mode);
                                 req.get().set_key_code(character);
                                 req.get().set_character(character);
                                 req.get().set_modifiers(modifiers);
@@ -379,15 +602,20 @@ async fn async_main() -> anyhow::Result<()> {
                                         let arg_str = results.get_arg()
                                             .map(|r| r.to_str().unwrap_or("")).unwrap_or("");
 
-                                        if action_str.is_empty() {
-                                            // No binding in Lua — noop
-                                        } else if action_str.starts_with("switch-mode:") {
-                                            let new_mode = &action_str["switch-mode:".len()..];
-                                            current_mode = new_mode.to_string();
-                                            ui_state.set_mode(&current_mode);
-                                            compositor.invalidate_chrome();
-                                        } else if dispatch_action(action_str, arg_str, buf_id, &core, &mut mux_state) {
-                                            break; // quit
+                                        if !action_str.is_empty() {
+                                            let result = dispatch_action(
+                                                action_str, arg_str, buf_id, &core, &mut mux_state,
+                                                &mut ui_state, &mut command_buffer, &mut command_prefix,
+                                            ).await;
+                                            match result {
+                                                DispatchResult::Quit => break,
+                                                DispatchResult::ModeSwitch(new_mode) => {
+                                                    current_mode = new_mode;
+                                                    ui_state.set_mode(&current_mode);
+                                                    compositor.invalidate_chrome();
+                                                }
+                                                DispatchResult::Done => {}
+                                            }
                                         }
                                     }
                                 }

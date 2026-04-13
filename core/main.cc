@@ -416,6 +416,122 @@ public:
     }
     return kj::READY_NOW;
   }
+
+  // ---- Cursor navigation ----
+
+  kj::Promise<void> cursorInit(CursorInitContext context) override {
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    auto fulfiller = std::make_shared<kj::Own<kj::PromiseFulfiller<void>>>(
+        kj::mv(paf.fulfiller));
+
+    engine_.cursor_init(context.getParams().getBufferId(),
+        [context, fulfiller](bool active) mutable {
+          context.getResults().setActive(active);
+          (*fulfiller)->fulfill();
+        });
+
+    return kj::mv(paf.promise);
+  }
+
+  kj::Promise<void> cursorNext(CursorNextContext context) override {
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    auto fulfiller = std::make_shared<kj::Own<kj::PromiseFulfiller<void>>>(
+        kj::mv(paf.fulfiller));
+
+    engine_.cursor_next(context.getParams().getBufferId(),
+        [fulfiller]() mutable {
+          (*fulfiller)->fulfill();
+        });
+
+    return kj::mv(paf.promise);
+  }
+
+  kj::Promise<void> cursorPrev(CursorPrevContext context) override {
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    auto fulfiller = std::make_shared<kj::Own<kj::PromiseFulfiller<void>>>(
+        kj::mv(paf.fulfiller));
+
+    engine_.cursor_prev(context.getParams().getBufferId(),
+        [fulfiller]() mutable {
+          (*fulfiller)->fulfill();
+        });
+
+    return kj::mv(paf.promise);
+  }
+
+  kj::Promise<void> cursorMoveDir(CursorMoveDirContext context) override {
+    auto params = context.getParams();
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    auto fulfiller = std::make_shared<kj::Own<kj::PromiseFulfiller<void>>>(
+        kj::mv(paf.fulfiller));
+
+    engine_.cursor_move_dir(params.getBufferId(),
+        params.getDx(), params.getDy(), params.getExtend(),
+        [fulfiller]() mutable {
+          (*fulfiller)->fulfill();
+        });
+
+    return kj::mv(paf.promise);
+  }
+
+  kj::Promise<void> cursorActivate(CursorActivateContext context) override {
+    engine_.cursor_activate(context.getParams().getBufferId());
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> cursorClear(CursorClearContext context) override {
+    engine_.cursor_clear(context.getParams().getBufferId());
+    return kj::READY_NOW;
+  }
+
+  // ---- Match list ----
+
+  kj::Promise<void> matchSet(MatchSetContext context) override {
+    auto params = context.getParams();
+    std::string selector = params.getSelector();
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    auto fulfiller = std::make_shared<kj::Own<kj::PromiseFulfiller<void>>>(
+        kj::mv(paf.fulfiller));
+
+    engine_.match_set(params.getBufferId(), selector,
+        [context, fulfiller](uint32_t count) mutable {
+          context.getResults().setCount(count);
+          (*fulfiller)->fulfill();
+        });
+
+    return kj::mv(paf.promise);
+  }
+
+  kj::Promise<void> matchNext(MatchNextContext context) override {
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    auto fulfiller = std::make_shared<kj::Own<kj::PromiseFulfiller<void>>>(
+        kj::mv(paf.fulfiller));
+
+    engine_.match_next(context.getParams().getBufferId(),
+        [fulfiller]() mutable {
+          (*fulfiller)->fulfill();
+        });
+
+    return kj::mv(paf.promise);
+  }
+
+  kj::Promise<void> matchPrev(MatchPrevContext context) override {
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    auto fulfiller = std::make_shared<kj::Own<kj::PromiseFulfiller<void>>>(
+        kj::mv(paf.fulfiller));
+
+    engine_.match_prev(context.getParams().getBufferId(),
+        [fulfiller]() mutable {
+          (*fulfiller)->fulfill();
+        });
+
+    return kj::mv(paf.promise);
+  }
+
+  kj::Promise<void> matchClear(MatchClearContext context) override {
+    engine_.match_clear(context.getParams().getBufferId());
+    return kj::READY_NOW;
+  }
 };
 
 // --- CEF pump ---

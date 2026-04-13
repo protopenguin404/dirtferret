@@ -27,6 +27,32 @@ set("n", "L", "go-forward")
 set("n", "r", "reload")
 set("n", "J", "tab-next")
 set("n", "K", "tab-prev")
+set("n", "\t", "cursor-init")
+set("n", ":", "command-enter")
+set("n", "o", "command-enter:goto ")
+set("n", "/", "command-enter:query ")
+set("n", "f", "follow-init")
+
+-- Cursor mode: element navigation with keyboard
+set("c", "h", "cursor-left")
+set("c", "j", "cursor-down")
+set("c", "k", "cursor-up")
+set("c", "l", "cursor-right")
+set("c", "\t", "cursor-next")
+set("c", "\r", "cursor-activate")
+set("c", "n", "match-next")
+set("c", "N", "match-prev")
+set("c", "v", "switch-mode:visual")
+set("c", "q", "quit")
+set("c", "H", "go-back")
+set("c", "L", "go-forward")
+
+-- Visual mode: extend selection with movement
+set("v", "h", "visual-left")
+set("v", "j", "visual-down")
+set("v", "k", "visual-up")
+set("v", "l", "visual-right")
+set("v", "\t", "visual-next")
 
 -- Passthrough mode
 -- (Escape is handled client-side for zero-latency exit)

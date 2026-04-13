@@ -67,6 +67,20 @@ interface Core {
   regionSelect @28 (bufferId :Int32, scope :Types.RpcScope, selectorArg :Text) -> ();
   regionClear  @29 (bufferId :Int32) -> ();
   getRegions   @30 (bufferId :Int32) -> (regions :List(Types.RegionInfo));
+
+  # ---- Cursor navigation ----
+  cursorInit     @31 (bufferId :Int32) -> (active :Bool);
+  cursorNext     @32 (bufferId :Int32) -> ();
+  cursorPrev     @33 (bufferId :Int32) -> ();
+  cursorMoveDir  @34 (bufferId :Int32, dx :Int32, dy :Int32, extend :Bool) -> ();
+  cursorActivate @35 (bufferId :Int32) -> ();
+  cursorClear    @36 (bufferId :Int32) -> ();
+
+  # ---- Match list (query results / follow links) ----
+  matchSet   @37 (bufferId :Int32, selector :Text) -> (count :UInt32);
+  matchNext  @38 (bufferId :Int32) -> ();
+  matchPrev  @39 (bufferId :Int32) -> ();
+  matchClear @40 (bufferId :Int32) -> ();
 }
 
 # The UI callback interface — implemented by dirtferret-tui.

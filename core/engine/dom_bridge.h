@@ -29,6 +29,9 @@ public:
     void remove_cursor_visual(uint32_t cursor_id);
     void clear_all_visuals();
 
+    // --- Document update callback ---
+    void set_on_document_updated(std::function<void()> cb) { on_document_updated_ = std::move(cb); }
+
     // --- Lifecycle ---
     void enable();   // DOM.enable() + Overlay.enable() + cache root nodeId
     void disable();
@@ -63,6 +66,7 @@ private:
     int next_message_id_ = 1;
     int root_node_id_ = -1;
     std::map<int, CdpCallback> pending_;
+    std::function<void()> on_document_updated_;
 
     IMPLEMENT_REFCOUNTING(DomBridge);
 };

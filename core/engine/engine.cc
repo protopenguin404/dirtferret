@@ -8,9 +8,27 @@
 #include "include/cef_browser.h"
 #include "shm/frame_pool.h"
 
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <map>
+
+static const char* FOCUSABLE_SELECTOR =
+    "a[href],button,input,select,textarea,[tabindex],[role='button'],[onclick]";
+
+struct CursorState {
+  bool active = false;
+  uint32_t region_id = 0;
+  int32_t current_index = -1;
+  std::vector<ElementInfo> cached_elements;
+  bool elements_dirty = true;
+};
+
+struct MatchList {
+  std::vector<ElementInfo> matches;
+  int32_t current_index = -1;
+  bool active = false;
+};
 
 struct BufferState {
   CefRefPtr<Client> client;
@@ -18,6 +36,10 @@ struct BufferState {
   int32_t id = -1;
   RegionSet regions;
   CefRefPtr<DomBridge> dom_bridge;
+  CursorState cursor;
+  MatchList match_list;
+  int32_t last_mouse_x = 0;
+  int32_t last_mouse_y = 0;
 };
 
 struct Engine::Impl {
@@ -149,6 +171,14 @@ int32_t Engine::create_buffer(const std::string &url,
     state.dom_bridge = new DomBridge(c->browser());
     state.dom_bridge->enable();
 
+    // Wire document-updated to dirty cursor elements cache
+    state.dom_bridge->set_on_document_updated([this, browser_id]() {
+      auto it2 = impl_->buffers.find(browser_id);
+      if (it2 != impl_->buffers.end()) {
+        it2->second.cursor.elements_dirty = true;
+      }
+    });
+
     impl_->buffers[browser_id] = std::move(state);
 
     if (impl_->active_buffer < 0) {
@@ -191,6 +221,13 @@ int32_t Engine::create_buffer(const std::string &url,
   });
 
   client->set_on_state_changed([this](int32_t browser_id) {
+    auto it = impl_->buffers.find(browser_id);
+    if (it != impl_->buffers.end()) {
+      // If loading just finished, dirty the cursor elements cache
+      if (!it->second.client->is_loading()) {
+        it->second.cursor.elements_dirty = true;
+      }
+    }
     if (impl_->state_callback) {
       impl_->state_callback(browser_id);
     }
@@ -399,6 +436,10 @@ void Engine::send_mouse_event(int32_t buffer_id, uint32_t event_type,
   auto it = impl_->buffers.find(buffer_id);
   if (it == impl_->buffers.end())
     return;
+
+  it->second.last_mouse_x = x;
+  it->second.last_mouse_y = y;
+
   auto browser = it->second.client->browser();
   if (!browser)
     return;
@@ -566,6 +607,304 @@ std::vector<Region> Engine::get_regions(int32_t buffer_id) const {
   auto it = impl_->buffers.find(buffer_id);
   if (it == impl_->buffers.end()) return {};
   return it->second.regions.all();
+}
+
+// --- Spatial navigation helper (testable free function) ---
+
+int find_nearest_in_direction(const std::vector<ElementInfo>& elements,
+                              int current_index, int dx, int dy) {
+  if (current_index < 0 || current_index >= (int)elements.size()) return -1;
+
+  auto& current = elements[current_index];
+  int cx = current.bounds_x + (int)current.bounds_width / 2;
+  int cy = current.bounds_y + (int)current.bounds_height / 2;
+
+  int best_index = -1;
+  double best_dist = 1e18;
+
+  for (size_t i = 0; i < elements.size(); ++i) {
+    if ((int)i == current_index) continue;
+    auto& cand = elements[i];
+    int ex = cand.bounds_x + (int)cand.bounds_width / 2;
+    int ey = cand.bounds_y + (int)cand.bounds_height / 2;
+
+    int delta_x = ex - cx;
+    int delta_y = ey - cy;
+
+    // Check forward half-plane: dot product with direction > 0
+    int dot = delta_x * dx + delta_y * dy;
+    if (dot <= 0) continue;
+
+    double dist = std::sqrt((double)(delta_x * delta_x + delta_y * delta_y));
+    if (dist < best_dist) {
+      best_dist = dist;
+      best_index = (int)i;
+    }
+  }
+
+  return best_index;
+}
+
+// --- Cursor navigation ---
+
+void Engine::ensure_cursor_elements(int32_t buffer_id,
+                                    std::function<void()> continuation) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end() || !it->second.dom_bridge) {
+    continuation();
+    return;
+  }
+  auto& cursor = it->second.cursor;
+  if (!cursor.elements_dirty) {
+    continuation();
+    return;
+  }
+  it->second.dom_bridge->query(FOCUSABLE_SELECTOR,
+      [this, buffer_id, cont = std::move(continuation)](std::vector<ElementInfo> elements) {
+        auto it2 = impl_->buffers.find(buffer_id);
+        if (it2 != impl_->buffers.end()) {
+          it2->second.cursor.cached_elements = std::move(elements);
+          it2->second.cursor.elements_dirty = false;
+        }
+        cont();
+      });
+}
+
+void Engine::cursor_init(int32_t buffer_id, std::function<void(bool)> callback) {
+  ensure_cursor_elements(buffer_id, [this, buffer_id, cb = std::move(callback)]() {
+    auto it = impl_->buffers.find(buffer_id);
+    if (it == impl_->buffers.end()) { cb(false); return; }
+    auto& buf = it->second;
+    auto& cursor = buf.cursor;
+
+    if (cursor.cached_elements.empty()) { cb(false); return; }
+
+    cursor.current_index = 0;
+    cursor.active = true;
+
+    auto& elem = cursor.cached_elements[0];
+    int cx = elem.bounds_x + (int)elem.bounds_width / 2;
+    int cy = elem.bounds_y + (int)elem.bounds_height / 2;
+
+    // Clear any old cursor region
+    if (cursor.region_id > 0) {
+      buf.regions.remove(cursor.region_id);
+    }
+    cursor.region_id = buf.regions.add({cx, cy});
+
+    // Highlight
+    if (buf.dom_bridge) {
+      buf.dom_bridge->clear_highlight();
+      buf.dom_bridge->highlight_node(elem.node_id, 66, 135, 245, 0.4f);
+    }
+
+    cb(true);
+  });
+}
+
+void Engine::cursor_next(int32_t buffer_id, std::function<void()> callback) {
+  ensure_cursor_elements(buffer_id, [this, buffer_id, cb = std::move(callback)]() {
+    auto it = impl_->buffers.find(buffer_id);
+    if (it == impl_->buffers.end()) { if (cb) cb(); return; }
+    auto& buf = it->second;
+    auto& cursor = buf.cursor;
+
+    if (!cursor.active || cursor.cached_elements.empty()) { if (cb) cb(); return; }
+
+    cursor.current_index = (cursor.current_index + 1) % (int)cursor.cached_elements.size();
+
+    auto& elem = cursor.cached_elements[cursor.current_index];
+    int cx = elem.bounds_x + (int)elem.bounds_width / 2;
+    int cy = elem.bounds_y + (int)elem.bounds_height / 2;
+
+    buf.regions.move(cursor.region_id, {cx, cy});
+
+    if (buf.dom_bridge) {
+      buf.dom_bridge->clear_highlight();
+      buf.dom_bridge->highlight_node(elem.node_id, 66, 135, 245, 0.4f);
+    }
+
+    if (cb) cb();
+  });
+}
+
+void Engine::cursor_prev(int32_t buffer_id, std::function<void()> callback) {
+  ensure_cursor_elements(buffer_id, [this, buffer_id, cb = std::move(callback)]() {
+    auto it = impl_->buffers.find(buffer_id);
+    if (it == impl_->buffers.end()) { if (cb) cb(); return; }
+    auto& buf = it->second;
+    auto& cursor = buf.cursor;
+
+    if (!cursor.active || cursor.cached_elements.empty()) { if (cb) cb(); return; }
+
+    int size = (int)cursor.cached_elements.size();
+    cursor.current_index = (cursor.current_index - 1 + size) % size;
+
+    auto& elem = cursor.cached_elements[cursor.current_index];
+    int cx = elem.bounds_x + (int)elem.bounds_width / 2;
+    int cy = elem.bounds_y + (int)elem.bounds_height / 2;
+
+    buf.regions.move(cursor.region_id, {cx, cy});
+
+    if (buf.dom_bridge) {
+      buf.dom_bridge->clear_highlight();
+      buf.dom_bridge->highlight_node(elem.node_id, 66, 135, 245, 0.4f);
+    }
+
+    if (cb) cb();
+  });
+}
+
+void Engine::cursor_move_dir(int32_t buffer_id, int dx, int dy, bool extend,
+                             std::function<void()> callback) {
+  ensure_cursor_elements(buffer_id,
+      [this, buffer_id, dx, dy, extend, cb = std::move(callback)]() {
+    auto it = impl_->buffers.find(buffer_id);
+    if (it == impl_->buffers.end()) { if (cb) cb(); return; }
+    auto& buf = it->second;
+    auto& cursor = buf.cursor;
+
+    if (!cursor.active || cursor.cached_elements.empty() || cursor.current_index < 0) {
+      if (cb) cb();
+      return;
+    }
+
+    int best_index = find_nearest_in_direction(
+        cursor.cached_elements, cursor.current_index, dx, dy);
+
+    if (best_index >= 0) {
+      cursor.current_index = best_index;
+      auto& elem = cursor.cached_elements[best_index];
+      int nx = elem.bounds_x + (int)elem.bounds_width / 2;
+      int ny = elem.bounds_y + (int)elem.bounds_height / 2;
+
+      if (extend) {
+        buf.regions.extend(cursor.region_id, {nx, ny});
+      } else {
+        buf.regions.move(cursor.region_id, {nx, ny});
+      }
+
+      if (buf.dom_bridge) {
+        buf.dom_bridge->clear_highlight();
+        buf.dom_bridge->highlight_node(elem.node_id, 66, 135, 245, 0.4f);
+      }
+    }
+
+    if (cb) cb();
+  });
+}
+
+void Engine::cursor_activate(int32_t buffer_id) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end()) return;
+  auto& cursor = it->second.cursor;
+  if (!cursor.active || cursor.current_index < 0 ||
+      cursor.current_index >= (int)cursor.cached_elements.size()) return;
+
+  auto& elem = cursor.cached_elements[cursor.current_index];
+  int cx = elem.bounds_x + (int)elem.bounds_width / 2;
+  int cy = elem.bounds_y + (int)elem.bounds_height / 2;
+
+  // Click: mouse down then up
+  send_mouse_event(buffer_id, 0/*down*/, cx, cy, 0/*left*/, 0/*no mods*/);
+  send_mouse_event(buffer_id, 1/*up*/, cx, cy, 0/*left*/, 0/*no mods*/);
+}
+
+void Engine::cursor_clear(int32_t buffer_id) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end()) return;
+  auto& cursor = it->second.cursor;
+  if (cursor.region_id > 0) {
+    it->second.regions.remove(cursor.region_id);
+  }
+  if (it->second.dom_bridge) {
+    it->second.dom_bridge->clear_highlight();
+  }
+  cursor.active = false;
+  cursor.region_id = 0;
+  cursor.current_index = -1;
+  // Also clear match list
+  match_clear(buffer_id);
+}
+
+bool Engine::cursor_active(int32_t buffer_id) const {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end()) return false;
+  return it->second.cursor.active;
+}
+
+// --- Match list ---
+
+void Engine::match_set(int32_t buffer_id, const std::string& selector,
+                       std::function<void(uint32_t count)> callback) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end() || !it->second.dom_bridge) {
+    callback(0);
+    return;
+  }
+
+  it->second.dom_bridge->query(selector,
+      [this, buffer_id, cb = std::move(callback)](std::vector<ElementInfo> elements) {
+        auto it2 = impl_->buffers.find(buffer_id);
+        if (it2 == impl_->buffers.end()) { cb(0); return; }
+        auto& buf = it2->second;
+
+        buf.match_list.matches = std::move(elements);
+        buf.match_list.active = !buf.match_list.matches.empty();
+        buf.match_list.current_index = buf.match_list.active ? 0 : -1;
+
+        // Also set cursor to first match
+        if (buf.match_list.active) {
+          buf.cursor.cached_elements = buf.match_list.matches;
+          buf.cursor.elements_dirty = false;
+          buf.cursor.current_index = 0;
+          buf.cursor.active = true;
+
+          auto& elem = buf.match_list.matches[0];
+          int cx = elem.bounds_x + (int)elem.bounds_width / 2;
+          int cy = elem.bounds_y + (int)elem.bounds_height / 2;
+
+          if (buf.cursor.region_id > 0) {
+            buf.regions.remove(buf.cursor.region_id);
+          }
+          buf.cursor.region_id = buf.regions.add({cx, cy});
+
+          if (buf.dom_bridge) {
+            buf.dom_bridge->clear_highlight();
+            buf.dom_bridge->highlight_node(elem.node_id, 66, 135, 245, 0.4f);
+          }
+        }
+
+        cb(static_cast<uint32_t>(buf.match_list.matches.size()));
+      });
+}
+
+void Engine::match_next(int32_t buffer_id, std::function<void()> callback) {
+  cursor_next(buffer_id, [this, buffer_id, cb = std::move(callback)]() {
+    auto it = impl_->buffers.find(buffer_id);
+    if (it != impl_->buffers.end() && it->second.match_list.active) {
+      it->second.match_list.current_index = it->second.cursor.current_index;
+    }
+    if (cb) cb();
+  });
+}
+
+void Engine::match_prev(int32_t buffer_id, std::function<void()> callback) {
+  cursor_prev(buffer_id, [this, buffer_id, cb = std::move(callback)]() {
+    auto it = impl_->buffers.find(buffer_id);
+    if (it != impl_->buffers.end() && it->second.match_list.active) {
+      it->second.match_list.current_index = it->second.cursor.current_index;
+    }
+    if (cb) cb();
+  });
+}
+
+void Engine::match_clear(int32_t buffer_id) {
+  auto it = impl_->buffers.find(buffer_id);
+  if (it == impl_->buffers.end()) return;
+  it->second.match_list.matches.clear();
+  it->second.match_list.current_index = -1;
+  it->second.match_list.active = false;
 }
 
 void Engine::do_message_loop_work() {

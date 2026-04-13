@@ -75,6 +75,9 @@ void DomBridge::OnDevToolsEvent(CefRefPtr<CefBrowser> /*browser*/,
         root_node_id_ = -1;
         // Re-fetch root so subsequent queries work.
         ensure_root([](){});
+        if (on_document_updated_) {
+            on_document_updated_();
+        }
     }
 }
 

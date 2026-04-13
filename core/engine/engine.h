@@ -18,6 +18,11 @@ using BufferClosedCallback = std::function<void(int32_t buffer_id)>;
 class DomBridge;   // forward declaration
 class LuaRuntime;  // forward declaration
 
+// Testable free function: find the nearest element in a direction.
+// Returns index into elements, or -1 if none found in the given direction.
+int find_nearest_in_direction(const std::vector<ElementInfo>& elements,
+                              int current_index, int dx, int dy);
+
 class Engine {
 public:
   Engine();
@@ -87,10 +92,29 @@ public:
   void region_clear(int32_t buffer_id);
   std::vector<Region> get_regions(int32_t buffer_id) const;
 
+  // --- Cursor navigation (async, callback-based) ---
+  void cursor_init(int32_t buffer_id, std::function<void(bool)> callback);
+  void cursor_next(int32_t buffer_id, std::function<void()> callback);
+  void cursor_prev(int32_t buffer_id, std::function<void()> callback);
+  void cursor_move_dir(int32_t buffer_id, int dx, int dy, bool extend,
+                       std::function<void()> callback);
+  void cursor_activate(int32_t buffer_id);
+  void cursor_clear(int32_t buffer_id);
+  bool cursor_active(int32_t buffer_id) const;
+
+  // --- Match list ---
+  void match_set(int32_t buffer_id, const std::string& selector,
+                 std::function<void(uint32_t count)> callback);
+  void match_next(int32_t buffer_id, std::function<void()> callback);
+  void match_prev(int32_t buffer_id, std::function<void()> callback);
+  void match_clear(int32_t buffer_id);
+
   // --- Lua ---
   LuaRuntime *lua_runtime();
 
 private:
+  void ensure_cursor_elements(int32_t buffer_id, std::function<void()> continuation);
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
