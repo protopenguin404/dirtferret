@@ -5,7 +5,7 @@ local M = {}
 
 M.settings = {
     -- Display
-    frame_rate = 30,
+    frame_rate = 60,
     scroll_lines = 3,
 
     -- Behavior
