@@ -56,3 +56,28 @@ target_link_libraries(test-input PRIVATE
   GTest::gtest_main
 )
 add_test(NAME test-input COMMAND test-input)
+
+# --- test-region: RegionSet operations (no CEF dependency) ---
+add_executable(test-region test_region.cc)
+target_include_directories(test-region PRIVATE
+  ${CMAKE_SOURCE_DIR}/core
+)
+target_link_libraries(test-region PRIVATE
+  GTest::gtest_main
+)
+add_test(NAME test-region COMMAND test-region)
+
+# --- test-cursor: Spatial navigation algorithm (no CEF dependency) ---
+# Only compiles the find_nearest_in_direction free function from engine.cc.
+# We provide a stub so the Engine class itself is not linked.
+add_executable(test-cursor
+  test_cursor.cc
+  ${CMAKE_SOURCE_DIR}/tests/core/cursor_algo_stub.cc
+)
+target_include_directories(test-cursor PRIVATE
+  ${CMAKE_SOURCE_DIR}/core
+)
+target_link_libraries(test-cursor PRIVATE
+  GTest::gtest_main
+)
+add_test(NAME test-cursor COMMAND test-cursor)

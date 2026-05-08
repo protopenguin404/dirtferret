@@ -55,6 +55,32 @@ interface Core {
   # TUI sends keypress, core checks Lua keymap, returns action.
   resolveKeybind @22 (mode :Text, keyCode :UInt32, character :UInt32,
                        modifiers :UInt32) -> (action :Text, arg :Text);
+
+  # ---- DOM queries (async — returns when CDP responds) ----
+  elementAt @23 (bufferId :Int32, x :Int32, y :Int32) -> (element :Types.RpcElementInfo);
+  query     @24 (bufferId :Int32, selector :Text) -> (elements :List(Types.RpcElementInfo));
+
+  # ---- Region management ----
+  regionAdd    @25 (bufferId :Int32, x :Int32, y :Int32) -> (regionId :UInt32);
+  regionRemove @26 (bufferId :Int32, regionId :UInt32) -> ();
+  regionMove   @27 (bufferId :Int32, regionId :UInt32, x :Int32, y :Int32) -> ();
+  regionSelect @28 (bufferId :Int32, scope :Types.RpcScope, selectorArg :Text) -> ();
+  regionClear  @29 (bufferId :Int32) -> ();
+  getRegions   @30 (bufferId :Int32) -> (regions :List(Types.RegionInfo));
+
+  # ---- Cursor navigation ----
+  cursorInit     @31 (bufferId :Int32) -> (active :Bool);
+  cursorNext     @32 (bufferId :Int32) -> ();
+  cursorPrev     @33 (bufferId :Int32) -> ();
+  cursorMoveDir  @34 (bufferId :Int32, dx :Int32, dy :Int32, extend :Bool) -> ();
+  cursorActivate @35 (bufferId :Int32) -> ();
+  cursorClear    @36 (bufferId :Int32) -> ();
+
+  # ---- Match list (query results / follow links) ----
+  matchSet   @37 (bufferId :Int32, selector :Text) -> (count :UInt32);
+  matchNext  @38 (bufferId :Int32) -> ();
+  matchPrev  @39 (bufferId :Int32) -> ();
+  matchClear @40 (bufferId :Int32) -> ();
 }
 
 # The UI callback interface — implemented by dirtferret-tui.

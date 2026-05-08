@@ -35,6 +35,9 @@ pub struct Ui {
     pub tab_bar_bg: [u8; 4],
     /// RGBA fill color for status bar region pixels.
     pub status_bar_bg: [u8; 4],
+    /// Active command line text (e.g. ":goto example.com").
+    /// When Some, replaces the normal status bar content.
+    command_line: Option<String>,
 }
 
 impl Ui {
@@ -69,6 +72,7 @@ impl Ui {
             active_tab: 0,
             tab_bar_bg: [40, 40, 40, 255],
             status_bar_bg: [50, 50, 50, 255],
+            command_line: None,
         }
     }
 
@@ -85,6 +89,17 @@ impl Ui {
                 "passthrough" => {
                     seg.fg = (0, 0, 0);
                     seg.bg = Some((200, 200, 0));
+                    seg.bold = true;
+                }
+                "cursor" => {
+                    // Cornflower blue background
+                    seg.fg = (0, 0, 0);
+                    seg.bg = Some((100, 149, 237));
+                    seg.bold = true;
+                }
+                "command" => {
+                    seg.fg = (0, 0, 0);
+                    seg.bg = Some((255, 255, 255));
                     seg.bold = true;
                 }
                 _ => {
@@ -114,6 +129,17 @@ impl Ui {
     pub fn set_tabs(&mut self, titles: Vec<String>, active: usize) {
         self.tab_titles = titles;
         self.active_tab = active;
+    }
+
+    /// Set the command line text displayed in the status bar.
+    /// Shows `:` prefix followed by the command prefix and buffer contents.
+    pub fn set_command_line(&mut self, prefix: &str, buffer: &str) {
+        self.command_line = Some(format!(":{}{}", prefix, buffer));
+    }
+
+    /// Clear the command line, restoring normal status bar display.
+    pub fn clear_command_line(&mut self) {
+        self.command_line = None;
     }
 
     /// Build ANSI escape string for the tab bar text overlay.
@@ -200,6 +226,7 @@ impl Ui {
     ///
     /// Positions cursor at the given row, disables autowrap, renders
     /// left/center/right segment groups with padding, truncates to `cols`.
+    /// When a command line is active, it replaces the normal status bar.
     pub fn status_line_ansi(&self, cols: u16, rows: u16) -> String {
         let max_w = cols as usize;
         let mut out = String::with_capacity(512);
@@ -209,6 +236,19 @@ impl Ui {
         out.push_str(&format!(
             "\x1b[{};1H\x1b[?7l\x1b[48;2;{};{};{}m\x1b[2K", rows, r, g, b
         ));
+
+        // Command line mode: replace entire status bar with command text + cursor
+        if let Some(ref cmd) = self.command_line {
+            // White text on status bar background
+            out.push_str("\x1b[38;2;255;255;255m\x1b[1m");
+            // Truncate to terminal width minus 1 (for block cursor)
+            let display: String = cmd.chars().take(max_w.saturating_sub(1)).collect();
+            out.push_str(&display);
+            // Block cursor at end
+            out.push('\u{2588}');
+            out.push_str("\x1b[0m\x1b[?7h");
+            return out;
+        }
 
         // Pre-render each group into (ansi_string, display_width) pairs
         let left = Self::render_segments(&self.status_left);

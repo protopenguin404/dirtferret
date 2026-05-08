@@ -79,3 +79,36 @@ enum LogLevel {
   warning @2;
   error   @3;
 }
+
+struct RpcPoint {
+  x @0 :Int32;
+  y @1 :Int32;
+}
+
+struct RegionInfo {
+  id      @0 :UInt32;
+  anchorX @1 :Int32;
+  anchorY @2 :Int32;
+  headX   @3 :Int32;
+  headY   @4 :Int32;
+}
+
+struct RpcElementInfo {
+  nodeId     @0 :Int32;
+  tag        @1 :Text;
+  bounds     @2 :Rect;
+  text       @3 :Text;
+  attributes @4 :List(RpcAttribute);
+}
+
+struct RpcAttribute {
+  name  @0 :Text;
+  value @1 :Text;
+}
+
+enum RpcScope {
+  element  @0;
+  block    @1;
+  word     @2;
+  selector @3;
+}

@@ -106,7 +106,7 @@
         }
 
         run-tests() {
-          build-core test-schema test-shm test-input
+          build-core test-schema test-shm test-input test-region
           cd build && ctest --output-on-failure && cd ..
           cd tui && cargo test && cd ..
         }
